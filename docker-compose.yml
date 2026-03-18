@@ -1,0 +1,51 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mini_soar_api
+    command: uvicorn mini_soar_api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      MINI_SOAR_REDIS_URL: redis://redis:6379/0
+      MINI_SOAR_DATABASE_URL: sqlite:///data/mini_soar.db
+      MINI_SOAR_REQUIRE_AUTH: "false"
+      MINI_SOAR_LOG_LEVEL: INFO
+      MINI_SOAR_JSON_LOGS: "true"
+    volumes:
+      - mini_soar_data:/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mini_soar_worker
+    command: python mini_soar_worker.py
+    environment:
+      MINI_SOAR_REDIS_URL: redis://redis:6379/0
+      MINI_SOAR_DATABASE_URL: sqlite:///data/mini_soar.db
+      MINI_SOAR_LOG_LEVEL: INFO
+      MINI_SOAR_JSON_LOGS: "true"
+    volumes:
+      - mini_soar_data:/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: mini_soar_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - mini_soar_redis:/data
+    restart: unless-stopped
+
+volumes:
+  mini_soar_data:
+  mini_soar_redis:
+

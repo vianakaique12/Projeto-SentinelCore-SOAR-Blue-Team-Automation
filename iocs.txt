@@ -1,0 +1,6 @@
+# IOC list for mini_soar.py demo
+8.8.8.8
+1.1.1.1
+example.com
+http://example.com/login
+d41d8cd98f00b204e9800998ecf8427e
