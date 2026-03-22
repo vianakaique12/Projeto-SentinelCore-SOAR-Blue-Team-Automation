@@ -1,0 +1,28 @@
+{
+  "virustotal": {
+    "malicious_high_threshold": 10,
+    "malicious_high_score": 70,
+    "malicious_medium_threshold": 3,
+    "malicious_medium_score": 50,
+    "malicious_low_threshold": 1,
+    "malicious_low_score": 30,
+    "suspicious_high_threshold": 5,
+    "suspicious_high_score": 15,
+    "suspicious_low_threshold": 1,
+    "suspicious_low_score": 5,
+    "negative_reputation_max_points": 20
+  },
+  "abuseipdb": {
+    "confidence_very_high_threshold": 90,
+    "confidence_very_high_score": 35,
+    "confidence_high_threshold": 60,
+    "confidence_high_score": 25,
+    "confidence_medium_threshold": 30,
+    "confidence_medium_score": 10,
+    "reports_high_threshold": 50,
+    "reports_high_score": 15,
+    "reports_low_threshold": 10,
+    "reports_low_score": 7
+  },
+  "max_score": 100
+}

@@ -28,6 +28,7 @@ from mini_soar_enrichment import (
     virustotal_lookup,
     virustotal_mock,
 )
+from mini_soar_scoring import load_scoring_config, score_finding
 from mini_soar_integrations import (
     INTEGRATION_PLUGIN_REGISTRY,
     IntegrationResult,
@@ -78,6 +79,7 @@ __all__ = [
     "IntegrationResult",
     "register_integration_plugin",
     "utc_now_iso",
+    "load_scoring_config",
     "DOMAIN_REGEX",
     "INTEGRATION_CHOICES",
     "TICKET_CHOICES",
@@ -135,6 +137,7 @@ class RuntimeConfig:
     log_level: str = "INFO"
     json_logs: bool = True
     demo_mode: bool = False
+    scoring_config_path: str | None = None
 
 
 def build_config_from_env() -> RuntimeConfig:
@@ -188,6 +191,7 @@ def build_config_from_env() -> RuntimeConfig:
         log_level=os.getenv("MINI_SOAR_LOG_LEVEL", "INFO"),
         json_logs=os.getenv("MINI_SOAR_JSON_LOGS", "true").lower() == "true",
         demo_mode=os.getenv("MINI_SOAR_DEMO_MODE", "false").lower() == "true",
+        scoring_config_path=os.getenv("MINI_SOAR_SCORING_CONFIG"),
     )
 
 
@@ -252,63 +256,7 @@ def detect_ioc_type(value: str) -> str:
     return "unknown"
 
 
-# ── Scoring ────────────────────────────────────────────────────────────────────
-
-def score_finding(vt: dict[str, Any] | None, abuse: dict[str, Any] | None) -> tuple[int, list[str]]:
-    """Compute a 0–100 risk score and list of reasons from enrichment data."""
-    score = 0
-    reasons: list[str] = []
-
-    if vt:
-        stats = vt.get("analysis_stats", {})
-        malicious = int(stats.get("malicious", 0))
-        suspicious = int(stats.get("suspicious", 0))
-        reputation = vt.get("reputation")
-
-        if malicious >= 10:
-            score += 70
-            reasons.append(f"VirusTotal malicious engines: {malicious} (high)")
-        elif malicious >= 3:
-            score += 50
-            reasons.append(f"VirusTotal malicious engines: {malicious} (medium)")
-        elif malicious >= 1:
-            score += 30
-            reasons.append(f"VirusTotal malicious engines: {malicious} (low)")
-
-        if suspicious >= 5:
-            score += 15
-            reasons.append(f"VirusTotal suspicious engines: {suspicious}")
-        elif suspicious >= 1:
-            score += 5
-            reasons.append(f"VirusTotal suspicious engines: {suspicious}")
-
-        if isinstance(reputation, int) and reputation < 0:
-            rep_points = min(abs(reputation), 20)
-            score += rep_points
-            reasons.append(f"Negative reputation in VirusTotal: {reputation}")
-
-    if abuse:
-        abuse_conf = int(abuse.get("abuse_confidence_score", 0))
-        total_reports = int(abuse.get("total_reports", 0))
-
-        if abuse_conf >= 90:
-            score += 35
-            reasons.append(f"AbuseIPDB confidence score: {abuse_conf} (very high)")
-        elif abuse_conf >= 60:
-            score += 25
-            reasons.append(f"AbuseIPDB confidence score: {abuse_conf} (high)")
-        elif abuse_conf >= 30:
-            score += 10
-            reasons.append(f"AbuseIPDB confidence score: {abuse_conf} (medium)")
-
-        if total_reports >= 50:
-            score += 15
-            reasons.append(f"AbuseIPDB reports: {total_reports}")
-        elif total_reports >= 10:
-            score += 7
-            reasons.append(f"AbuseIPDB reports: {total_reports}")
-
-    return min(score, 100), reasons
+# score_finding is imported from mini_soar_scoring; re-exported via __all__
 
 
 def priority_from_score(score: int) -> str:
@@ -398,7 +346,8 @@ def process_ioc(
             if abuse_error:
                 errors.append(f"AbuseIPDB: {abuse_error}")
 
-    risk_score, reasons = score_finding(vt_data, abuse_data)
+    scoring_cfg = load_scoring_config(config.scoring_config_path)
+    risk_score, reasons = score_finding(vt_data, abuse_data, scoring_cfg)
     priority = priority_from_score(risk_score)
 
     finding: dict[str, Any] = {
