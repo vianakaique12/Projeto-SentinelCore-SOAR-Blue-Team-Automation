@@ -14,6 +14,10 @@ report*.json
 metrics*.csv
 plugin_example_events.jsonl
 
+# Allow versioned example files
+!example_report.json
+!example_tickets.jsonl
+
 # Env/secrets
 .env
 

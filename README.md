@@ -4,6 +4,7 @@
 [![codecov](https://codecov.io/gh/vianakaique12/Projeto-SentinelCore-SOAR-Blue-Team-Automation/branch/master/graph/badge.svg)](https://codecov.io/gh/vianakaique12/Projeto-SentinelCore-SOAR-Blue-Team-Automation)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Tested with Real Data](https://img.shields.io/badge/tested%20with-real%20threat%20intel%20data-brightgreen)
 
 Projeto de automação de segurança focado em fluxo SOC real:
 - Enriquecimento de IOC (VirusTotal + AbuseIPDB)
@@ -541,11 +542,18 @@ Use `.env.example` como referência para:
 
 ## Como um recrutador pode avaliar em 5 minutos
 
+0. **Sem rodar nada** — abra [example_report.json](example_report.json) e [example_tickets.jsonl](example_tickets.jsonl) para ver resultados reais do pipeline (VirusTotal + AbuseIPDB + MITRE ATT&CK).
 1. Subir stack com `.\start_stack.ps1`.
 2. Abrir `http://127.0.0.1:8000/docs`.
 3. Testar `/analyze` com IOC simples.
 4. Testar `/analyze/async` e consultar `/jobs/{id}`.
 5. Verificar relatório de saída e métricas em `/metrics`.
+
+> Ou rode em **modo demo** (sem API keys) para testar o fluxo completo:
+> ```powershell
+> $env:MINI_SOAR_DEMO_MODE="true"
+> python .\mini_soar.py --input .\iocs.txt --ticket-backend file --output .\report.json
+> ```
 
 ## Observações
 
