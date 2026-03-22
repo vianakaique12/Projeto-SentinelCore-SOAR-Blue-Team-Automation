@@ -8,13 +8,14 @@ import os
 import time
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mini_soar_core import RuntimeConfig, build_config_from_env, read_iocs, run_pipeline
 from mini_soar_health import run_health_checks
+from mini_soar_storage import create_store
 from mini_soar_observability import (
     API_REQUESTS_TOTAL,
     RATE_LIMIT_HITS_TOTAL,
@@ -90,6 +91,13 @@ class AsyncAcceptedResponse(BaseModel):
     job_id: str
     status: str
     correlation_id: str
+
+
+class FindingsResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    findings: list[dict]
 
 
 def choose(value: object, fallback: object) -> object:
@@ -355,3 +363,31 @@ def job_status(job_id: str, _: dict[str, Any] = Depends(authorize_request)) -> J
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Job not found or queue unavailable: {exc}") from exc
     return JSONResponse(payload)
+
+
+@app.get("/findings", response_model=FindingsResponse)
+def list_findings(
+    priority: str | None = Query(default=None, description="Filter by priority: low, medium, high, critical"),
+    ioc_type: str | None = Query(default=None, description="Filter by IOC type: ip, domain, url, hash"),
+    min_score: int | None = Query(default=None, ge=0, description="Minimum risk score (inclusive)"),
+    max_score: int | None = Query(default=None, le=100, description="Maximum risk score (inclusive)"),
+    ioc: str | None = Query(default=None, description="Partial match on IOC value"),
+    since: str | None = Query(default=None, description="ISO datetime — findings created at or after this time"),
+    until: str | None = Query(default=None, description="ISO datetime — findings created at or before this time"),
+    limit: int = Query(default=50, ge=1, le=200, description="Number of results to return (max 200)"),
+    offset: int = Query(default=0, ge=0, description="Number of results to skip"),
+    _: dict[str, Any] = Depends(authorize_request),
+) -> FindingsResponse:
+    env_cfg = build_config_from_env()
+    store = create_store(env_cfg.database_url)
+    filters: dict[str, Any] = {
+        "priority":  priority,
+        "ioc_type":  ioc_type,
+        "min_score": min_score,
+        "max_score": max_score,
+        "ioc":       ioc,
+        "since":     since,
+        "until":     until,
+    }
+    findings, total = store.query_findings(filters, limit=limit, offset=offset)
+    return FindingsResponse(total=total, limit=limit, offset=offset, findings=findings)

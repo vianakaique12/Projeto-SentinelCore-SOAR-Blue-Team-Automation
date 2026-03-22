@@ -82,6 +82,22 @@ class BaseStore:
         """
         raise NotImplementedError
 
+    def query_findings(
+        self,
+        filters: dict[str, Any],
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return ``(findings, total_count)`` matching *filters*.
+
+        Supported filter keys: ``priority``, ``ioc_type``, ``min_score``,
+        ``max_score``, ``ioc`` (partial match), ``since``, ``until``
+        (ISO datetime strings compared against ``generated_at``).
+
+        Results are ordered newest-first (descending ``id``).
+        """
+        raise NotImplementedError
+
 
 # ── No-op store (used when no DB is configured) ────────────────────────────────
 
@@ -101,6 +117,14 @@ class NullStore(BaseStore):
         self, ioc: str, ioc_type: str
     ) -> dict[str, Any] | None:
         return None
+
+    def query_findings(
+        self,
+        filters: dict[str, Any],
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        return [], 0
 
 
 # ── SQLite ─────────────────────────────────────────────────────────────────────
@@ -226,6 +250,56 @@ class SQLiteStore(BaseStore):
             return json.loads(row[0])
         except (json.JSONDecodeError, TypeError):
             return None
+
+    def query_findings(
+        self,
+        filters: dict[str, Any],
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if filters.get("priority"):
+            clauses.append("priority = ?")
+            params.append(filters["priority"])
+        if filters.get("ioc_type"):
+            clauses.append("ioc_type = ?")
+            params.append(filters["ioc_type"])
+        if filters.get("min_score") is not None:
+            clauses.append("risk_score >= ?")
+            params.append(int(filters["min_score"]))
+        if filters.get("max_score") is not None:
+            clauses.append("risk_score <= ?")
+            params.append(int(filters["max_score"]))
+        if filters.get("ioc"):
+            clauses.append("ioc LIKE ?")
+            params.append(f"%{filters['ioc']}%")
+        if filters.get("since"):
+            clauses.append("generated_at >= ?")
+            params.append(filters["since"])
+        if filters.get("until"):
+            clauses.append("generated_at <= ?")
+            params.append(filters["until"])
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self._connect() as conn:
+            total: int = conn.execute(
+                f"SELECT COUNT(*) FROM findings {where}", params
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT payload_json FROM findings {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
+
+        findings: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                findings.append(json.loads(row[0]))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return findings, total
 
 
 # ── Postgres ───────────────────────────────────────────────────────────────────
@@ -359,6 +433,59 @@ class PostgresStore(BaseStore):
             return json.loads(row[0])
         except (json.JSONDecodeError, TypeError):
             return None
+
+    def query_findings(
+        self,
+        filters: dict[str, Any],
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if filters.get("priority"):
+            clauses.append("priority = %s")
+            params.append(filters["priority"])
+        if filters.get("ioc_type"):
+            clauses.append("ioc_type = %s")
+            params.append(filters["ioc_type"])
+        if filters.get("min_score") is not None:
+            clauses.append("risk_score >= %s")
+            params.append(int(filters["min_score"]))
+        if filters.get("max_score") is not None:
+            clauses.append("risk_score <= %s")
+            params.append(int(filters["max_score"]))
+        if filters.get("ioc"):
+            clauses.append("ioc LIKE %s")
+            params.append(f"%{filters['ioc']}%")
+        if filters.get("since"):
+            clauses.append("generated_at >= %s")
+            params.append(filters["since"])
+        if filters.get("until"):
+            clauses.append("generated_at <= %s")
+            params.append(filters["until"])
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM findings {where}", params
+                )
+                total: int = cur.fetchone()[0]
+                cur.execute(
+                    f"SELECT payload_json FROM findings {where} ORDER BY id DESC LIMIT %s OFFSET %s",
+                    params + [limit, offset],
+                )
+                rows = cur.fetchall()
+
+        findings: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                findings.append(json.loads(row[0]))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return findings, total
 
 
 # ── Factory ────────────────────────────────────────────────────────────────────
