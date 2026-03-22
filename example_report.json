@@ -1,0 +1,318 @@
+{
+  "generated_at": "2026-03-22T14:33:19.882341+00:00",
+  "correlation_id": "e4a2f1b8c9d04e6ab3127f05dc98e731",
+  "demo_mode": false,
+  "summary": {
+    "total_iocs": 4,
+    "with_errors": 0,
+    "high_or_critical": 2,
+    "skipped_by_idempotency": 0,
+    "tickets_opened": 2,
+    "ticket_backend": "file",
+    "ticket_threshold": 70,
+    "integration_targets": [],
+    "integration_threshold": 60,
+    "integration_attempts": 0,
+    "integration_success": 0,
+    "integration_failed": 0,
+    "avg_risk_score": 57.5
+  },
+  "findings": [
+    {
+      "ioc": "185.220.101.47",
+      "ioc_type": "ip",
+      "generated_at": "2026-03-22T14:33:07.421892+00:00",
+      "correlation_id": "e4a2f1b8c9d04e6ab3127f05dc98e731",
+      "risk_score": 100,
+      "priority": "critical",
+      "reasons": [
+        "VirusTotal malicious engines: 14 (high)",
+        "VirusTotal suspicious engines: 3",
+        "Negative reputation in VirusTotal: -68",
+        "AbuseIPDB confidence score: 100 (very high)",
+        "AbuseIPDB reports: 847",
+        "GreyNoise: classified as malicious (noise=true)",
+        "Shodan: open suspicious port(s): 4444, 9050",
+        "Shodan: CVE(s) found: CVE-2021-44228",
+        "OTX AlienVault: 47 threat pulse(s) referencing this IOC"
+      ],
+      "virustotal": {
+        "status": 200,
+        "analysis_stats": {
+          "malicious": 14,
+          "suspicious": 3,
+          "harmless": 9,
+          "undetected": 46
+        },
+        "reputation": -68,
+        "last_analysis_date": 1742652788,
+        "permalink": "https://www.virustotal.com/gui/search/185.220.101.47"
+      },
+      "abuseipdb": {
+        "status": 200,
+        "abuse_confidence_score": 100,
+        "total_reports": 847,
+        "country_code": "DE",
+        "usage_type": "Data Center/Web Hosting/Transit",
+        "isp": "Frantech Solutions",
+        "domain": "frantech.ca"
+      },
+      "greynoise": {
+        "status": 200,
+        "classification": "malicious",
+        "noise": true,
+        "riot": false,
+        "name": "Unknown",
+        "link": "https://viz.greynoise.io/ip/185.220.101.47"
+      },
+      "shodan": {
+        "status": 200,
+        "ports": [22, 80, 443, 4444, 9050],
+        "vulns": ["CVE-2021-44228"],
+        "os": null,
+        "org": "Frantech Solutions",
+        "isp": "Frantech Solutions"
+      },
+      "otx": {
+        "status": 200,
+        "pulse_count": 47,
+        "ioc_type": "ip"
+      },
+      "sources_queried": ["virustotal", "abuseipdb", "greynoise", "shodan", "otx"],
+      "errors": [],
+      "ticket": {
+        "backend": "file",
+        "ok": true,
+        "reference": "tickets.jsonl",
+        "created_at": "2026-03-22T14:33:08.054103+00:00",
+        "error": null
+      },
+      "integrations": [],
+      "skipped": false,
+      "mitre_attack": [
+        {
+          "technique_id": "T1071",
+          "name": "Application Layer Protocol"
+        },
+        {
+          "technique_id": "T1041",
+          "name": "Exfiltration Over C2 Channel"
+        },
+        {
+          "technique_id": "T1486",
+          "name": "Data Encrypted for Impact"
+        }
+      ],
+      "runbook_steps": [
+        "Validate IOC context in SIEM/EDR and confirm if ip '185.220.101.47' appears in recent logs.",
+        "Correlate with endpoint, network, and identity telemetry for affected assets/users.",
+        "Check if IOC is present in threat intel blocklists and existing detection rules.",
+        "Block IP in firewall/proxy if malicious activity is confirmed.",
+        "Open incident with incident commander and notify on-call team.",
+        "Collect volatile evidence and preserve artifacts for forensics.",
+        "Document timeline, actions, and lessons learned in incident ticket."
+      ]
+    },
+    {
+      "ioc": "secure-login-paypa1.com",
+      "ioc_type": "domain",
+      "generated_at": "2026-03-22T14:33:09.834271+00:00",
+      "correlation_id": "e4a2f1b8c9d04e6ab3127f05dc98e731",
+      "risk_score": 78,
+      "priority": "high",
+      "reasons": [
+        "VirusTotal malicious engines: 8 (medium)",
+        "VirusTotal suspicious engines: 2",
+        "Negative reputation in VirusTotal: -27",
+        "OTX AlienVault: 3 threat pulse(s) referencing this IOC"
+      ],
+      "virustotal": {
+        "status": 200,
+        "analysis_stats": {
+          "malicious": 8,
+          "suspicious": 2,
+          "harmless": 17,
+          "undetected": 45
+        },
+        "reputation": -27,
+        "last_analysis_date": 1742566411,
+        "permalink": "https://www.virustotal.com/gui/search/secure-login-paypa1.com"
+      },
+      "abuseipdb": null,
+      "greynoise": null,
+      "shodan": null,
+      "otx": {
+        "status": 200,
+        "pulse_count": 3,
+        "ioc_type": "domain"
+      },
+      "sources_queried": ["virustotal", "otx"],
+      "errors": [],
+      "ticket": {
+        "backend": "file",
+        "ok": true,
+        "reference": "tickets.jsonl",
+        "created_at": "2026-03-22T14:33:10.391847+00:00",
+        "error": null
+      },
+      "integrations": [],
+      "skipped": false,
+      "mitre_attack": [
+        {
+          "technique_id": "T1566",
+          "name": "Phishing"
+        },
+        {
+          "technique_id": "T1071.001",
+          "name": "Application Layer Protocol: Web"
+        },
+        {
+          "technique_id": "T1486",
+          "name": "Data Encrypted for Impact"
+        }
+      ],
+      "runbook_steps": [
+        "Validate IOC context in SIEM/EDR and confirm if domain 'secure-login-paypa1.com' appears in recent logs.",
+        "Correlate with endpoint, network, and identity telemetry for affected assets/users.",
+        "Check if IOC is present in threat intel blocklists and existing detection rules.",
+        "Block domain/URL in DNS and secure web gateway controls.",
+        "Open incident with incident commander and notify on-call team.",
+        "Collect volatile evidence and preserve artifacts for forensics.",
+        "Document timeline, actions, and lessons learned in incident ticket."
+      ]
+    },
+    {
+      "ioc": "a3f5b8c2d14e7f0944e621cbb3e09a17",
+      "ioc_type": "hash",
+      "generated_at": "2026-03-22T14:33:11.203451+00:00",
+      "correlation_id": "e4a2f1b8c9d04e6ab3127f05dc98e731",
+      "risk_score": 52,
+      "priority": "medium",
+      "reasons": [
+        "VirusTotal malicious engines: 5 (medium)",
+        "VirusTotal suspicious engines: 2",
+        "Negative reputation in VirusTotal: -12",
+        "OTX AlienVault: 2 threat pulse(s) referencing this IOC"
+      ],
+      "virustotal": {
+        "status": 200,
+        "analysis_stats": {
+          "malicious": 5,
+          "suspicious": 2,
+          "harmless": 3,
+          "undetected": 62
+        },
+        "reputation": -12,
+        "last_analysis_date": 1742480034,
+        "permalink": "https://www.virustotal.com/gui/search/a3f5b8c2d14e7f0944e621cbb3e09a17"
+      },
+      "abuseipdb": null,
+      "greynoise": null,
+      "shodan": null,
+      "otx": {
+        "status": 200,
+        "pulse_count": 2,
+        "ioc_type": "hash"
+      },
+      "sources_queried": ["virustotal", "otx"],
+      "errors": [],
+      "ticket": null,
+      "integrations": [],
+      "skipped": false,
+      "mitre_attack": [
+        {
+          "technique_id": "T1059",
+          "name": "Command and Scripting Interpreter"
+        },
+        {
+          "technique_id": "T1027",
+          "name": "Obfuscated Files or Information"
+        },
+        {
+          "technique_id": "T1204",
+          "name": "User Execution"
+        }
+      ],
+      "runbook_steps": [
+        "Validate IOC context in SIEM/EDR and confirm if hash 'a3f5b8c2d14e7f0944e621cbb3e09a17' appears in recent logs.",
+        "Correlate with endpoint, network, and identity telemetry for affected assets/users.",
+        "Check if IOC is present in threat intel blocklists and existing detection rules.",
+        "Quarantine matching file hash on endpoints and trigger malware triage.",
+        "Document timeline, actions, and lessons learned in incident ticket."
+      ]
+    },
+    {
+      "ioc": "8.8.8.8",
+      "ioc_type": "ip",
+      "generated_at": "2026-03-22T14:33:12.617834+00:00",
+      "correlation_id": "e4a2f1b8c9d04e6ab3127f05dc98e731",
+      "risk_score": 0,
+      "priority": "low",
+      "reasons": [],
+      "virustotal": {
+        "status": 200,
+        "analysis_stats": {
+          "malicious": 0,
+          "suspicious": 0,
+          "harmless": 71,
+          "undetected": 1
+        },
+        "reputation": 3,
+        "last_analysis_date": 1742739201,
+        "permalink": "https://www.virustotal.com/gui/search/8.8.8.8"
+      },
+      "abuseipdb": {
+        "status": 200,
+        "abuse_confidence_score": 0,
+        "total_reports": 0,
+        "country_code": "US",
+        "usage_type": "Data Center/Web Hosting/Transit",
+        "isp": "Google LLC",
+        "domain": "google.com"
+      },
+      "greynoise": {
+        "status": 200,
+        "classification": "benign",
+        "noise": false,
+        "riot": true,
+        "name": "Google Public DNS",
+        "link": "https://viz.greynoise.io/ip/8.8.8.8"
+      },
+      "shodan": {
+        "status": 200,
+        "ports": [53, 443],
+        "vulns": [],
+        "os": null,
+        "org": "Google LLC",
+        "isp": "Google LLC"
+      },
+      "otx": {
+        "status": 200,
+        "pulse_count": 0,
+        "ioc_type": "ip"
+      },
+      "sources_queried": ["virustotal", "abuseipdb", "greynoise", "shodan", "otx"],
+      "errors": [],
+      "ticket": null,
+      "integrations": [],
+      "skipped": false,
+      "mitre_attack": [
+        {
+          "technique_id": "T1071",
+          "name": "Application Layer Protocol"
+        },
+        {
+          "technique_id": "T1041",
+          "name": "Exfiltration Over C2 Channel"
+        }
+      ],
+      "runbook_steps": [
+        "Validate IOC context in SIEM/EDR and confirm if ip '8.8.8.8' appears in recent logs.",
+        "Correlate with endpoint, network, and identity telemetry for affected assets/users.",
+        "Check if IOC is present in threat intel blocklists and existing detection rules.",
+        "Block IP in firewall/proxy if malicious activity is confirmed.",
+        "Document timeline, actions, and lessons learned in incident ticket."
+      ]
+    }
+  ]
+}

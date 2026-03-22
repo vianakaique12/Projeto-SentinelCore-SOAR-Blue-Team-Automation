@@ -89,6 +89,8 @@ Os resultados acima foram gerados com dados reais das APIs do VirusTotal e Abuse
 O pipeline detecta, enriquece, pontua e prioriza automaticamente — sem intervenção manual.
 IOCs sensíveis estão parcialmente censurados (`xx` / `[.]` / `[:]`).
 
+> Veja um relatório completo de exemplo: [example_report.json](example_report.json)
+
 ## Arquitetura
 
 ```mermaid
