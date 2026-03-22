@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mini_soar_core import RuntimeConfig, build_config_from_env, read_iocs, run_pipeline
+from mini_soar_health import run_health_checks
 from mini_soar_observability import (
     API_REQUESTS_TOTAL,
     RATE_LIMIT_HITS_TOTAL,
@@ -255,13 +256,21 @@ async def api_metrics_middleware(request: Request, call_next):
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
-    demo_mode = os.getenv("MINI_SOAR_DEMO_MODE", "false").lower() == "true"
-    return {
-        "status": "ok",
-        "demo_mode": demo_mode,
-        "enrichment": "mock (demo)" if demo_mode else "live (api keys required)",
-    }
+def health() -> JSONResponse:
+    env_cfg = build_config_from_env()
+    limit, window = _rate_limit_settings()
+    payload, http_code = run_health_checks(
+        database_url=env_cfg.database_url,
+        redis_url=os.getenv("MINI_SOAR_REDIS_URL"),
+        vt_api_key=env_cfg.vt_api_key,
+        abuse_api_key=env_cfg.abuse_api_key,
+        rate_limit_backend=_rate_limiter.backend_name,
+        rate_limit_limit=limit,
+        rate_limit_window=window,
+        demo_mode=env_cfg.demo_mode,
+        api_version=app.version,
+    )
+    return JSONResponse(content=payload, status_code=http_code)
 
 
 @app.get("/metrics")
