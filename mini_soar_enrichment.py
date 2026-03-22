@@ -4,6 +4,13 @@
 Handles HTTP requests with retry/backoff and IOC lookups against:
 - VirusTotal API v3
 - AbuseIPDB API v2
+- GreyNoise Community API  (IPs only)
+- Shodan Host API           (IPs only)
+- OTX AlienVault API        (all IOC types)
+
+All lookup functions are optional: if the caller does not supply an API key
+the function should not be called.  Each function catches its own errors and
+returns ``(None, error_message)`` so the pipeline can continue gracefully.
 
 Also provides deterministic mock functions for demo mode (MINI_SOAR_DEMO_MODE=true).
 """
@@ -277,6 +284,152 @@ def abuseipdb_lookup(
     }, None
 
 
+# ── GreyNoise ──────────────────────────────────────────────────────────────────
+
+def greynoise_lookup(
+    ip: str,
+    api_key: str,
+    timeout: int,
+    max_retries: int = 2,
+    retry_backoff_seconds: float = 0.5,
+    correlation_id: str | None = None,
+    logger: logging.Logger | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Query the GreyNoise Community API for IP context.
+
+    Returns a dict with:
+      - ``classification``: "benign" | "malicious" | "unknown"
+      - ``noise``: bool — whether the IP has been observed actively scanning
+      - ``riot``: bool — whether the IP belongs to a known benign service/CDN
+      - ``name``: human-readable name (may be None)
+      - ``link``: GreyNoise viz URL (may be None)
+    """
+    url = f"https://api.greynoise.io/v3/community/{urllib.parse.quote(ip)}"
+    status, data, error = http_json_request(
+        url=url,
+        headers={"key": api_key, "Accept": "application/json"},
+        timeout=timeout, connector_name="greynoise",
+        max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds,
+        correlation_id=correlation_id, logger=logger,
+    )
+    if error:
+        return None, error
+    if not isinstance(data, dict):
+        return None, "Unexpected response format from GreyNoise"
+    return {
+        "status": status,
+        "classification": data.get("classification", "unknown"),
+        "noise": bool(data.get("noise", False)),
+        "riot": bool(data.get("riot", False)),
+        "name": data.get("name"),
+        "link": data.get("link"),
+    }, None
+
+
+# ── Shodan ─────────────────────────────────────────────────────────────────────
+
+def shodan_lookup(
+    ip: str,
+    api_key: str,
+    timeout: int,
+    max_retries: int = 2,
+    retry_backoff_seconds: float = 0.5,
+    correlation_id: str | None = None,
+    logger: logging.Logger | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Query the Shodan Host API for open ports, CVEs, and host metadata.
+
+    Returns a dict with:
+      - ``ports``: sorted list of open ports
+      - ``vulns``: list of CVE IDs associated with this host
+      - ``os``: operating system string (may be None)
+      - ``org``: organisation name (may be None)
+      - ``isp``: ISP name (may be None)
+    """
+    url = (
+        f"https://api.shodan.io/shodan/host/{urllib.parse.quote(ip)}"
+        f"?key={urllib.parse.quote(api_key)}"
+    )
+    status, data, error = http_json_request(
+        url=url,
+        timeout=timeout, connector_name="shodan",
+        max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds,
+        correlation_id=correlation_id, logger=logger,
+    )
+    if error:
+        return None, error
+    if not isinstance(data, dict):
+        return None, "Unexpected response format from Shodan"
+
+    raw_vulns = data.get("vulns", {})
+    vulns = list(raw_vulns.keys()) if isinstance(raw_vulns, dict) else list(raw_vulns)
+
+    return {
+        "status": status,
+        "ports": sorted(int(p) for p in data.get("ports", [])),
+        "vulns": vulns,
+        "os": data.get("os"),
+        "org": data.get("org"),
+        "isp": data.get("isp"),
+    }, None
+
+
+# ── OTX AlienVault ─────────────────────────────────────────────────────────────
+
+_OTX_TYPE_MAP: dict[str, str] = {
+    "ip":     "IPv4",
+    "domain": "domain",
+    "url":    "url",
+    "hash":   "file",
+}
+
+
+def otx_lookup(
+    ioc: str,
+    ioc_type: str,
+    api_key: str,
+    timeout: int,
+    max_retries: int = 2,
+    retry_backoff_seconds: float = 0.5,
+    correlation_id: str | None = None,
+    logger: logging.Logger | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Query the OTX AlienVault API for pulse context.
+
+    Supported IOC types: ip, domain, url, hash.
+
+    Returns a dict with:
+      - ``pulse_count``: number of OTX pulses that reference this IOC
+      - ``ioc_type``: the normalised IOC type string
+    """
+    otx_type = _OTX_TYPE_MAP.get(ioc_type)
+    if not otx_type:
+        return None, f"OTX does not support IOC type '{ioc_type}'"
+
+    url = (
+        f"https://otx.alienvault.com/api/v1/indicators"
+        f"/{otx_type}/{urllib.parse.quote(ioc)}/general"
+    )
+    status, data, error = http_json_request(
+        url=url,
+        headers={"X-OTX-API-KEY": api_key, "Accept": "application/json"},
+        timeout=timeout, connector_name="otx",
+        max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds,
+        correlation_id=correlation_id, logger=logger,
+    )
+    if error:
+        return None, error
+    if not isinstance(data, dict):
+        return None, "Unexpected response format from OTX"
+
+    pulse_info = data.get("pulse_info") or {}
+    return {
+        "status": status,
+        "pulse_count": int(pulse_info.get("count", 0)),
+        "ioc_type": ioc_type,
+    }, None
+
+
 # ── Demo / Mock ────────────────────────────────────────────────────────────────
 
 def _demo_seed(ioc: str) -> int:
@@ -345,4 +498,71 @@ def abuseipdb_mock(ioc: str) -> tuple[dict[str, Any] | None, str | None]:
         "usage_type": rng.choice(["Data Center/Web Hosting/Transit", "ISP", "Fixed Line ISP"]),
         "isp": rng.choice(_isps),
         "domain": f"demo-isp-{seed % 999}.net",
+    }, None
+
+
+def greynoise_mock(ioc: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Deterministic GreyNoise mock. Same IOC always produces the same result."""
+    seed = _demo_seed(ioc)
+    rng = random.Random(seed)
+    classifications = ["benign", "malicious", "unknown"]
+    classification = classifications[seed % 3]
+    riot = classification == "benign" and bool(rng.randint(0, 1))
+    return {
+        "status": 200,
+        "classification": classification,
+        "noise": bool(rng.randint(0, 1)),
+        "riot": riot,
+        "name": f"Demo Service {seed % 100}",
+        "link": f"https://www.greynoise.io/viz/ip/{ioc}",
+    }, None
+
+
+def shodan_mock(ioc: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Deterministic Shodan mock. Same IOC always produces the same result."""
+    seed = _demo_seed(ioc)
+    rng = random.Random(seed)
+    all_ports = [22, 25, 80, 443, 3389, 4444, 5555, 6379, 8080, 9200, 27017]
+    num_ports = rng.randint(1, min(5, len(all_ports)))
+    ports = sorted(random.Random(seed).sample(all_ports, k=num_ports))
+
+    vulns: list[str] = []
+    if seed % 4 > 1:
+        num_vulns = rng.randint(1, 3)
+        vulns = [
+            f"CVE-{2020 + rng.randint(0, 4)}-{rng.randint(1000, 9999)}"
+            for _ in range(num_vulns)
+        ]
+
+    return {
+        "status": 200,
+        "ports": ports,
+        "vulns": vulns,
+        "os": rng.choice(["Linux", "Windows", None]),
+        "org": f"Demo Org {seed % 50}",
+        "isp": f"Demo ISP {seed % 20}",
+    }, None
+
+
+def otx_mock(ioc: str, ioc_type: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Deterministic OTX mock. Same IOC always produces the same result."""
+    if ioc_type not in _OTX_TYPE_MAP:
+        return None, f"OTX does not support IOC type '{ioc_type}'"
+
+    seed = _demo_seed(ioc)
+    rng = random.Random(seed)
+    tier = seed % 4
+    if tier == 0:
+        pulse_count = rng.randint(0, 1)
+    elif tier == 1:
+        pulse_count = rng.randint(1, 4)
+    elif tier == 2:
+        pulse_count = rng.randint(5, 15)
+    else:
+        pulse_count = rng.randint(16, 50)
+
+    return {
+        "status": 200,
+        "pulse_count": pulse_count,
+        "ioc_type": ioc_type,
     }, None

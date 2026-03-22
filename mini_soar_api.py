@@ -221,6 +221,12 @@ def build_runtime_config_from_request(request: AnalyzeRequest) -> RuntimeConfig:
         persist_findings=env_cfg.persist_findings,
         log_level=env_cfg.log_level,
         json_logs=env_cfg.json_logs,
+        greynoise_api_key=env_cfg.greynoise_api_key,
+        greynoise_timeout=env_cfg.greynoise_timeout,
+        shodan_api_key=env_cfg.shodan_api_key,
+        shodan_timeout=env_cfg.shodan_timeout,
+        otx_api_key=env_cfg.otx_api_key,
+        otx_timeout=env_cfg.otx_timeout,
     )
 
 

@@ -24,6 +24,12 @@ from typing import Any
 from mini_soar_enrichment import (
     abuseipdb_lookup,
     abuseipdb_mock,
+    greynoise_lookup,
+    greynoise_mock,
+    otx_lookup,
+    otx_mock,
+    shodan_lookup,
+    shodan_mock,
     utc_now_iso,
     virustotal_lookup,
     virustotal_mock,
@@ -139,6 +145,14 @@ class RuntimeConfig:
     demo_mode: bool = False
     scoring_config_path: str | None = None
 
+    # ── Additional threat intelligence sources ─────────────────────────────────
+    greynoise_api_key: str | None = None
+    greynoise_timeout: int = 20
+    shodan_api_key: str | None = None
+    shodan_timeout: int = 20
+    otx_api_key: str | None = None
+    otx_timeout: int = 20
+
 
 def build_config_from_env() -> RuntimeConfig:
     """Build a RuntimeConfig from environment variables."""
@@ -192,6 +206,12 @@ def build_config_from_env() -> RuntimeConfig:
         json_logs=os.getenv("MINI_SOAR_JSON_LOGS", "true").lower() == "true",
         demo_mode=os.getenv("MINI_SOAR_DEMO_MODE", "false").lower() == "true",
         scoring_config_path=os.getenv("MINI_SOAR_SCORING_CONFIG"),
+        greynoise_api_key=os.getenv("GREYNOISE_API_KEY"),
+        greynoise_timeout=int(os.getenv("MINI_SOAR_GREYNOISE_TIMEOUT", "20")),
+        shodan_api_key=os.getenv("SHODAN_API_KEY"),
+        shodan_timeout=int(os.getenv("MINI_SOAR_SHODAN_TIMEOUT", "20")),
+        otx_api_key=os.getenv("OTX_API_KEY"),
+        otx_timeout=int(os.getenv("MINI_SOAR_OTX_TIMEOUT", "20")),
     )
 
 
@@ -312,6 +332,10 @@ def process_ioc(
                 ],
                 "virustotal": None,
                 "abuseipdb": None,
+                "greynoise": None,
+                "shodan": None,
+                "otx": None,
+                "sources_queried": [],
                 "errors": [],
                 "ticket": None,
                 "integrations": [],
@@ -334,8 +358,11 @@ def process_ioc(
         )
         return finding
 
-    vt_data: dict[str, Any] | None = None
-    abuse_data: dict[str, Any] | None = None
+    vt_data:        dict[str, Any] | None = None
+    abuse_data:     dict[str, Any] | None = None
+    greynoise_data: dict[str, Any] | None = None
+    shodan_data:    dict[str, Any] | None = None
+    otx_data:       dict[str, Any] | None = None
 
     if config.demo_mode:
         vt_data, vt_error = virustotal_mock(ioc, ioc_type)
@@ -345,6 +372,15 @@ def process_ioc(
             abuse_data, abuse_error = abuseipdb_mock(ioc)
             if abuse_error:
                 errors.append(f"AbuseIPDB (demo): {abuse_error}")
+            greynoise_data, gn_error = greynoise_mock(ioc)
+            if gn_error:
+                errors.append(f"GreyNoise (demo): {gn_error}")
+            shodan_data, sh_error = shodan_mock(ioc)
+            if sh_error:
+                errors.append(f"Shodan (demo): {sh_error}")
+        otx_data, otx_error = otx_mock(ioc, ioc_type)
+        if otx_error:
+            errors.append(f"OTX (demo): {otx_error}")
     else:
         if config.vt_api_key:
             vt_data, vt_error = virustotal_lookup(
@@ -369,8 +405,44 @@ def process_ioc(
             if abuse_error:
                 errors.append(f"AbuseIPDB: {abuse_error}")
 
+        if config.greynoise_api_key and ioc_type == "ip":
+            greynoise_data, gn_error = greynoise_lookup(
+                ioc, config.greynoise_api_key,
+                timeout=config.greynoise_timeout,
+                max_retries=config.max_retries,
+                retry_backoff_seconds=config.retry_backoff_seconds,
+                correlation_id=correlation_id, logger=local_logger,
+            )
+            if gn_error:
+                errors.append(f"GreyNoise: {gn_error}")
+
+        if config.shodan_api_key and ioc_type == "ip":
+            shodan_data, sh_error = shodan_lookup(
+                ioc, config.shodan_api_key,
+                timeout=config.shodan_timeout,
+                max_retries=config.max_retries,
+                retry_backoff_seconds=config.retry_backoff_seconds,
+                correlation_id=correlation_id, logger=local_logger,
+            )
+            if sh_error:
+                errors.append(f"Shodan: {sh_error}")
+
+        if config.otx_api_key:
+            otx_data, otx_error = otx_lookup(
+                ioc, ioc_type, config.otx_api_key,
+                timeout=config.otx_timeout,
+                max_retries=config.max_retries,
+                retry_backoff_seconds=config.retry_backoff_seconds,
+                correlation_id=correlation_id, logger=local_logger,
+            )
+            if otx_error:
+                errors.append(f"OTX: {otx_error}")
+
     scoring_cfg = load_scoring_config(config.scoring_config_path)
-    risk_score, reasons = score_finding(vt_data, abuse_data, scoring_cfg)
+    risk_score, reasons = score_finding(
+        vt_data, abuse_data, scoring_cfg,
+        greynoise=greynoise_data, shodan=shodan_data, otx=otx_data,
+    )
     priority = priority_from_score(risk_score)
 
     finding: dict[str, Any] = {
@@ -383,6 +455,18 @@ def process_ioc(
         "reasons": reasons,
         "virustotal": vt_data,
         "abuseipdb": abuse_data,
+        "greynoise": greynoise_data,
+        "shodan": shodan_data,
+        "otx": otx_data,
+        "sources_queried": [
+            src for src, data in [
+                ("virustotal", vt_data),
+                ("abuseipdb",  abuse_data),
+                ("greynoise",  greynoise_data),
+                ("shodan",     shodan_data),
+                ("otx",        otx_data),
+            ] if data is not None
+        ],
         "errors": errors,
         "ticket": None,
         "integrations": [],

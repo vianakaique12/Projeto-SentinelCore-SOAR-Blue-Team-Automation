@@ -46,8 +46,41 @@ DEFAULT_SCORING_CONFIG: dict[str, Any] = {
         "reports_low_threshold": 10,
         "reports_low_score": 7,
     },
+    # ── GreyNoise ─────────────────────────────────────────────────────────────
+    # Benign/RIOT classification reduces score (IP is a known CDN or legitimate
+    # scanner) while malicious classification increases it.  Noise means the IP
+    # has been seen actively scanning the internet.
+    "greynoise": {
+        "malicious_score": 25,
+        "benign_reduction": 20,
+        "noise_score": 10,
+    },
+    # ── Shodan ────────────────────────────────────────────────────────────────
+    # CVEs on the host and suspicious open ports both increase the score.
+    "shodan": {
+        "vuln_score": 20,
+        "suspicious_port_score": 10,
+        "suspicious_port_max_points": 20,
+    },
+    # ── OTX AlienVault ────────────────────────────────────────────────────────
+    # The pulse_count reflects how many threat intelligence reports (pulses)
+    # mention this IOC.  Higher counts → higher risk.
+    "otx": {
+        "pulse_high_threshold": 5,
+        "pulse_high_score": 20,
+        "pulse_medium_threshold": 2,
+        "pulse_medium_score": 10,
+        "pulse_low_threshold": 1,
+        "pulse_low_score": 5,
+    },
     "max_score": 100,
 }
+
+# Ports that commonly indicate C2 activity, exposed admin services, or
+# vulnerable databases.  Used by the Shodan scorer.
+_SHODAN_SUSPICIOUS_PORTS: frozenset[int] = frozenset({
+    4444, 5555, 6666, 1080, 3389, 9200, 27017, 6379, 5900, 8443,
+})
 
 _VT_INT_KEYS: frozenset[str] = frozenset({
     "malicious_high_threshold", "malicious_high_score",
@@ -138,6 +171,18 @@ def load_scoring_config(path: str | None) -> dict[str, Any]:
             **DEFAULT_SCORING_CONFIG["abuseipdb"],
             **{k: v for k, v in raw.get("abuseipdb", {}).items()},
         },
+        "greynoise": {
+            **DEFAULT_SCORING_CONFIG["greynoise"],
+            **{k: v for k, v in raw.get("greynoise", {}).items()},
+        },
+        "shodan": {
+            **DEFAULT_SCORING_CONFIG["shodan"],
+            **{k: v for k, v in raw.get("shodan", {}).items()},
+        },
+        "otx": {
+            **DEFAULT_SCORING_CONFIG["otx"],
+            **{k: v for k, v in raw.get("otx", {}).items()},
+        },
     }
 
     validation_errors = _validate_scoring_config(merged)
@@ -157,15 +202,25 @@ def score_finding(
     vt: dict[str, Any] | None,
     abuse: dict[str, Any] | None,
     scoring_config: dict[str, Any] | None = None,
+    *,
+    greynoise: dict[str, Any] | None = None,
+    shodan: dict[str, Any] | None = None,
+    otx: dict[str, Any] | None = None,
 ) -> tuple[int, list[str]]:
     """Compute a 0–100 risk score and list of reasons from enrichment data.
 
     When *scoring_config* is None the function uses DEFAULT_SCORING_CONFIG,
     preserving full backward compatibility with callers that omit the argument.
+
+    The three new keyword-only parameters (*greynoise*, *shodan*, *otx*) are
+    optional and default to None, maintaining full backward compatibility.
     """
     cfg = scoring_config if scoring_config is not None else DEFAULT_SCORING_CONFIG
     vt_cfg    = cfg.get("virustotal", DEFAULT_SCORING_CONFIG["virustotal"])
     abuse_cfg = cfg.get("abuseipdb",  DEFAULT_SCORING_CONFIG["abuseipdb"])
+    gn_cfg    = cfg.get("greynoise",  DEFAULT_SCORING_CONFIG["greynoise"])
+    sh_cfg    = cfg.get("shodan",     DEFAULT_SCORING_CONFIG["shodan"])
+    otx_cfg   = cfg.get("otx",        DEFAULT_SCORING_CONFIG["otx"])
     max_score = int(cfg.get("max_score", 100))
 
     score = 0
@@ -243,5 +298,64 @@ def score_finding(
         elif total_reports >= r_l_t:
             score += r_l_s
             reasons.append(f"AbuseIPDB reports: {total_reports}")
+
+    if greynoise:
+        classification = str(greynoise.get("classification", "unknown"))
+        noise = bool(greynoise.get("noise", False))
+        riot  = bool(greynoise.get("riot", False))
+
+        gn_malicious_score  = int(gn_cfg.get("malicious_score",  25))
+        gn_benign_reduction = int(gn_cfg.get("benign_reduction", 20))
+        gn_noise_score      = int(gn_cfg.get("noise_score",      10))
+
+        if classification == "malicious":
+            score += gn_malicious_score
+            reasons.append(f"GreyNoise classification: malicious")
+        elif classification == "benign" or riot:
+            label = "RIOT/benign CDN" if riot else "benign"
+            score = max(0, score - gn_benign_reduction)
+            reasons.append(f"GreyNoise classification: {label} (score reduced)")
+
+        if noise:
+            score += gn_noise_score
+            reasons.append("GreyNoise: IP actively scanning the internet")
+
+    if shodan:
+        vulns = shodan.get("vulns") or []
+        ports = [int(p) for p in (shodan.get("ports") or [])]
+
+        sh_vuln_score        = int(sh_cfg.get("vuln_score",               20))
+        sh_port_score        = int(sh_cfg.get("suspicious_port_score",    10))
+        sh_port_max          = int(sh_cfg.get("suspicious_port_max_points", 20))
+
+        if vulns:
+            score += sh_vuln_score
+            reasons.append(f"Shodan: {len(vulns)} CVE(s) found ({', '.join(vulns[:3])}{'…' if len(vulns) > 3 else ''})")
+
+        suspicious_open = [p for p in ports if p in _SHODAN_SUSPICIOUS_PORTS]
+        if suspicious_open:
+            port_points = min(len(suspicious_open) * sh_port_score, sh_port_max)
+            score += port_points
+            reasons.append(f"Shodan: suspicious open port(s): {', '.join(str(p) for p in suspicious_open)}")
+
+    if otx:
+        pulse_count = int(otx.get("pulse_count", 0))
+
+        otx_high_t = int(otx_cfg.get("pulse_high_threshold",   5))
+        otx_high_s = int(otx_cfg.get("pulse_high_score",      20))
+        otx_med_t  = int(otx_cfg.get("pulse_medium_threshold", 2))
+        otx_med_s  = int(otx_cfg.get("pulse_medium_score",    10))
+        otx_low_t  = int(otx_cfg.get("pulse_low_threshold",    1))
+        otx_low_s  = int(otx_cfg.get("pulse_low_score",        5))
+
+        if pulse_count >= otx_high_t:
+            score += otx_high_s
+            reasons.append(f"OTX: {pulse_count} pulse(s) referencing this IOC (high)")
+        elif pulse_count >= otx_med_t:
+            score += otx_med_s
+            reasons.append(f"OTX: {pulse_count} pulse(s) referencing this IOC (medium)")
+        elif pulse_count >= otx_low_t:
+            score += otx_low_s
+            reasons.append(f"OTX: {pulse_count} pulse(s) referencing this IOC (low)")
 
     return min(score, max_score), reasons
