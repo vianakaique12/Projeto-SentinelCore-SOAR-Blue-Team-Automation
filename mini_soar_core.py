@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
-"""Core engine for Mini SOAR IOC enrichment and response automation."""
+"""Core engine for SentinelCore SOAR — pipeline orchestration and configuration.
+
+Coordinates IOC detection, enrichment, scoring, ticketing, and integrations.
+Heavy lifting is delegated to the focused sub-modules:
+  - mini_soar_enrichment   : HTTP helpers + VirusTotal / AbuseIPDB lookups + demo mocks
+  - mini_soar_ticketing    : ticket creation (file / webhook / Jira)
+  - mini_soar_integrations : SIEM/SOAR connectors (TheHive, Splunk, Sentinel) + plugin registry
+"""
 
 from __future__ import annotations
 
-import base64
 import csv
-import datetime as dt
-import hashlib
-import hmac
-import importlib
 import ipaddress
 import json
 import logging
 import os
-import random
 import re
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from mini_soar_enrichment import (
+    abuseipdb_lookup,
+    abuseipdb_mock,
+    utc_now_iso,
+    virustotal_lookup,
+    virustotal_mock,
+)
+from mini_soar_integrations import (
+    INTEGRATION_PLUGIN_REGISTRY,
+    IntegrationResult,
+    forward_to_integrations,
+    load_plugins_from_env,
+    register_integration_plugin,
+)
 from mini_soar_mitre import build_runbook_steps, map_finding_to_mitre
 from mini_soar_observability import (
-    CONNECTOR_LATENCY_SECONDS,
-    CONNECTOR_REQUESTS_TOTAL,
     IOCS_PROCESSED_TOTAL,
     PIPELINE_DURATION_SECONDS,
     PIPELINE_RUNS_TOTAL,
@@ -33,7 +44,10 @@ from mini_soar_observability import (
     log_event,
 )
 from mini_soar_storage import BaseStore, NullStore, create_store
+from mini_soar_ticketing import TicketResult, maybe_open_ticket
 
+
+# ── Constants ──────────────────────────────────────────────────────────────────
 
 DOMAIN_REGEX = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$"
@@ -43,21 +57,34 @@ INTEGRATION_CHOICES = {"thehive", "splunk", "sentinel"}
 TICKET_CHOICES = {"none", "file", "webhook", "jira"}
 
 
-@dataclass
-class TicketResult:
-    backend: str
-    ok: bool
-    reference: str | None = None
-    error: str | None = None
+# ── Re-exports for backward compatibility ──────────────────────────────────────
+# Code that previously imported these from mini_soar_core continues to work.
+
+__all__ = [
+    "RuntimeConfig",
+    "build_config_from_env",
+    "detect_ioc_type",
+    "read_iocs",
+    "score_finding",
+    "priority_from_score",
+    "process_ioc",
+    "run_pipeline",
+    "write_report_json",
+    "write_metrics_csv",
+    "runtime_config_to_dict",
+    "runtime_config_from_dict",
+    # re-exported from sub-modules
+    "TicketResult",
+    "IntegrationResult",
+    "register_integration_plugin",
+    "utc_now_iso",
+    "DOMAIN_REGEX",
+    "INTEGRATION_CHOICES",
+    "TICKET_CHOICES",
+]
 
 
-@dataclass
-class IntegrationResult:
-    target: str
-    ok: bool
-    reference: str | None = None
-    error: str | None = None
-
+# ── Configuration ──────────────────────────────────────────────────────────────
 
 @dataclass
 class RuntimeConfig:
@@ -110,25 +137,14 @@ class RuntimeConfig:
     demo_mode: bool = False
 
 
-def utc_now_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
-
-
-def utc_now_rfc1123() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-
-
 def build_config_from_env() -> RuntimeConfig:
+    """Build a RuntimeConfig from environment variables."""
     targets_raw = os.getenv("MINI_SOAR_INTEGRATION_TARGETS", "")
-    parsed_targets = tuple(
-        sorted(
-            {
-                item.strip().lower()
-                for item in targets_raw.split(",")
-                if item.strip().lower() in INTEGRATION_CHOICES
-            }
-        )
-    )
+    parsed_targets = tuple(sorted({
+        item.strip().lower()
+        for item in targets_raw.split(",")
+        if item.strip().lower() in INTEGRATION_CHOICES
+    }))
 
     return RuntimeConfig(
         vt_api_key=os.getenv("VT_API_KEY"),
@@ -175,7 +191,18 @@ def build_config_from_env() -> RuntimeConfig:
     )
 
 
+def runtime_config_to_dict(config: RuntimeConfig) -> dict[str, Any]:
+    return asdict(config)
+
+
+def runtime_config_from_dict(payload: dict[str, Any]) -> RuntimeConfig:
+    return RuntimeConfig(**payload)
+
+
+# ── IOC helpers ────────────────────────────────────────────────────────────────
+
 def read_iocs(input_file: str | None, inline_iocs: list[str]) -> list[str]:
+    """Read and deduplicate IOCs from an inline list and/or a file."""
     iocs: list[str] = []
 
     for value in inline_iocs:
@@ -203,6 +230,7 @@ def read_iocs(input_file: str | None, inline_iocs: list[str]) -> list[str]:
 
 
 def detect_ioc_type(value: str) -> str:
+    """Detect the type of an IOC string: ip, url, hash, domain, or unknown."""
     value = value.strip()
 
     try:
@@ -224,337 +252,10 @@ def detect_ioc_type(value: str) -> str:
     return "unknown"
 
 
-def vt_url_id(raw_url: str) -> str:
-    return base64.urlsafe_b64encode(raw_url.encode("utf-8")).decode("utf-8").rstrip("=")
-
-
-def _parse_retry_after_seconds(headers: Any) -> float | None:
-    if not headers:
-        return None
-    value = headers.get("Retry-After")
-    if not value:
-        return None
-    try:
-        return max(float(value), 0.0)
-    except ValueError:
-        return None
-
-
-def _compute_backoff_sleep(attempt: int, base: float, retry_after: float | None = None) -> float:
-    if retry_after is not None:
-        return retry_after
-    jitter = random.uniform(0.0, 0.2)
-    return (base * (2**attempt)) + jitter
-
-
-def http_raw_request(
-    url: str,
-    method: str = "GET",
-    headers: dict[str, str] | None = None,
-    body: bytes | None = None,
-    timeout: int = 20,
-    connector_name: str = "generic",
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> tuple[int, bytes | None, str | None]:
-    retries = max(0, max_retries)
-
-    for attempt in range(retries + 1):
-        started = time.perf_counter()
-        request = urllib.request.Request(url=url, method=method, headers=headers or {}, data=body)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
-                elapsed = time.perf_counter() - started
-                CONNECTOR_LATENCY_SECONDS.labels(connector=connector_name).observe(elapsed)
-                CONNECTOR_REQUESTS_TOTAL.labels(connector=connector_name, status=str(response.status)).inc()
-                if logger:
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "connector_request",
-                        correlation_id=correlation_id,
-                        connector=connector_name,
-                        status_code=response.status,
-                        duration_ms=round(elapsed * 1000, 2),
-                    )
-                return response.status, raw, None
-        except urllib.error.HTTPError as exc:
-            elapsed = time.perf_counter() - started
-            status_code = exc.code
-            raw_error = exc.read()
-            message = raw_error.decode("utf-8", errors="replace")
-            CONNECTOR_LATENCY_SECONDS.labels(connector=connector_name).observe(elapsed)
-            CONNECTOR_REQUESTS_TOTAL.labels(connector=connector_name, status=str(status_code)).inc()
-
-            retryable = status_code in {429, 500, 502, 503, 504}
-            if retryable and attempt < retries:
-                retry_after = _parse_retry_after_seconds(getattr(exc, "headers", None))
-                sleep_seconds = _compute_backoff_sleep(attempt, retry_backoff_seconds, retry_after=retry_after)
-                if logger:
-                    log_event(
-                        logger,
-                        logging.WARNING,
-                        "connector_retry",
-                        correlation_id=correlation_id,
-                        connector=connector_name,
-                        status_code=status_code,
-                        duration_ms=round(elapsed * 1000, 2),
-                        error=f"retry in {round(sleep_seconds, 3)}s",
-                    )
-                time.sleep(sleep_seconds)
-                continue
-
-            if logger:
-                log_event(
-                    logger,
-                    logging.ERROR,
-                    "connector_error",
-                    correlation_id=correlation_id,
-                    connector=connector_name,
-                    status_code=status_code,
-                    duration_ms=round(elapsed * 1000, 2),
-                    error=message[:500],
-                )
-            return status_code, None, f"HTTP {status_code}: {message}"
-        except urllib.error.URLError as exc:
-            elapsed = time.perf_counter() - started
-            CONNECTOR_LATENCY_SECONDS.labels(connector=connector_name).observe(elapsed)
-            CONNECTOR_REQUESTS_TOTAL.labels(connector=connector_name, status="network_error").inc()
-
-            retryable = attempt < retries
-            if retryable:
-                sleep_seconds = _compute_backoff_sleep(attempt, retry_backoff_seconds)
-                if logger:
-                    log_event(
-                        logger,
-                        logging.WARNING,
-                        "connector_retry",
-                        correlation_id=correlation_id,
-                        connector=connector_name,
-                        status_code=0,
-                        duration_ms=round(elapsed * 1000, 2),
-                        error=f"{exc.reason}; retry in {round(sleep_seconds, 3)}s",
-                    )
-                time.sleep(sleep_seconds)
-                continue
-
-            if logger:
-                log_event(
-                    logger,
-                    logging.ERROR,
-                    "connector_error",
-                    correlation_id=correlation_id,
-                    connector=connector_name,
-                    status_code=0,
-                    duration_ms=round(elapsed * 1000, 2),
-                    error=str(exc.reason),
-                )
-            return 0, None, f"Network error: {exc.reason}"
-
-    return 0, None, "Request failed after retries."
-
-
-def http_json_request(
-    url: str,
-    method: str = "GET",
-    headers: dict[str, str] | None = None,
-    payload: dict[str, Any] | list[Any] | None = None,
-    timeout: int = 20,
-    connector_name: str = "generic",
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> tuple[int, dict[str, Any] | list[Any] | None, str | None]:
-    body: bytes | None = None
-    req_headers = (headers or {}).copy()
-
-    if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        req_headers["Content-Type"] = "application/json"
-
-    status, raw, error = http_raw_request(
-        url=url,
-        method=method,
-        headers=req_headers,
-        body=body,
-        timeout=timeout,
-        connector_name=connector_name,
-        max_retries=max_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return status, None, error
-
-    if raw is None:
-        return status, None, None
-
-    text = raw.decode("utf-8", errors="replace")
-    if not text.strip():
-        return status, {}, None
-
-    try:
-        return status, json.loads(text), None
-    except json.JSONDecodeError as exc:
-        return status, None, f"Invalid JSON response: {exc}"
-
-def virustotal_lookup(
-    ioc: str,
-    ioc_type: str,
-    api_key: str,
-    timeout: int,
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    endpoint_map = {
-        "ip": f"https://www.virustotal.com/api/v3/ip_addresses/{urllib.parse.quote(ioc)}",
-        "domain": f"https://www.virustotal.com/api/v3/domains/{urllib.parse.quote(ioc)}",
-        "hash": f"https://www.virustotal.com/api/v3/files/{urllib.parse.quote(ioc)}",
-        "url": f"https://www.virustotal.com/api/v3/urls/{vt_url_id(ioc)}",
-    }
-    if ioc_type not in endpoint_map:
-        return None, f"VirusTotal does not support IOC type '{ioc_type}'."
-
-    status, data, error = http_json_request(
-        url=endpoint_map[ioc_type],
-        headers={"x-apikey": api_key, "Accept": "application/json"},
-        timeout=timeout,
-        connector_name="virustotal",
-        max_retries=max_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return None, error
-
-    attributes = data.get("data", {}).get("attributes", {}) if isinstance(data, dict) else {}
-    analysis_stats = attributes.get("last_analysis_stats", {})
-    reputation = attributes.get("reputation")
-    last_analysis_date = attributes.get("last_analysis_date")
-
-    return {
-        "status": status,
-        "analysis_stats": analysis_stats,
-        "reputation": reputation,
-        "last_analysis_date": last_analysis_date,
-        "permalink": f"https://www.virustotal.com/gui/search/{urllib.parse.quote(ioc)}",
-    }, None
-
-
-def abuseipdb_lookup(
-    ip: str,
-    api_key: str,
-    max_age_days: int,
-    timeout: int,
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    query = urllib.parse.urlencode({"ipAddress": ip, "maxAgeInDays": max_age_days, "verbose": ""})
-    url = f"https://api.abuseipdb.com/api/v2/check?{query}"
-    status, data, error = http_json_request(
-        url=url,
-        headers={"Key": api_key, "Accept": "application/json"},
-        timeout=timeout,
-        connector_name="abuseipdb",
-        max_retries=max_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return None, error
-
-    details = data.get("data", {}) if isinstance(data, dict) else {}
-    return {
-        "status": status,
-        "abuse_confidence_score": details.get("abuseConfidenceScore", 0),
-        "total_reports": details.get("totalReports", 0),
-        "country_code": details.get("countryCode"),
-        "usage_type": details.get("usageType"),
-        "isp": details.get("isp"),
-        "domain": details.get("domain"),
-    }, None
-
-
-def _demo_seed(ioc: str) -> int:
-    return int(hashlib.md5(ioc.encode("utf-8")).hexdigest(), 16)
-
-
-def virustotal_mock(ioc: str, ioc_type: str) -> tuple[dict[str, Any] | None, str | None]:
-    """Deterministic mock for VirusTotal. Same IOC always produces same result."""
-    if ioc_type not in {"ip", "domain", "url", "hash"}:
-        return None, f"VirusTotal does not support IOC type '{ioc_type}'."
-
-    seed = _demo_seed(ioc)
-    rng = random.Random(seed)
-    tier = seed % 4  # 0=low, 1=medium, 2=high, 3=critical
-
-    if tier == 0:
-        malicious, suspicious, harmless = rng.randint(0, 1), rng.randint(0, 2), rng.randint(55, 70)
-    elif tier == 1:
-        malicious, suspicious, harmless = rng.randint(2, 4), rng.randint(1, 4), rng.randint(35, 55)
-    elif tier == 2:
-        malicious, suspicious, harmless = rng.randint(5, 9), rng.randint(2, 6), rng.randint(10, 30)
-    else:
-        malicious, suspicious, harmless = rng.randint(10, 20), rng.randint(3, 8), rng.randint(0, 10)
-
-    undetected = max(0, 72 - harmless - malicious - suspicious)
-    reputation = -(malicious * 3) if malicious > 0 else rng.randint(0, 10)
-
-    return {
-        "status": 200,
-        "analysis_stats": {
-            "malicious": malicious,
-            "suspicious": suspicious,
-            "harmless": harmless,
-            "undetected": undetected,
-        },
-        "reputation": reputation,
-        "last_analysis_date": int(time.time()) - rng.randint(0, 86400 * 30),
-        "permalink": f"https://www.virustotal.com/gui/search/{urllib.parse.quote(ioc)}",
-    }, None
-
-
-def abuseipdb_mock(ioc: str) -> tuple[dict[str, Any] | None, str | None]:
-    """Deterministic mock for AbuseIPDB. Same IOC always produces same result."""
-    seed = _demo_seed(ioc)
-    rng = random.Random(seed)
-    tier = seed % 4
-
-    _countries = ["BR", "US", "CN", "RU", "DE", "NL", "UA", "KR", "IN", "FR"]
-    _isps = ["Amazon AWS", "Google Cloud", "DigitalOcean", "OVH SAS", "Hetzner Online", "Cloudflare"]
-
-    if tier == 0:
-        abuse_score, total_reports = rng.randint(0, 15), rng.randint(0, 5)
-    elif tier == 1:
-        abuse_score, total_reports = rng.randint(20, 50), rng.randint(6, 20)
-    elif tier == 2:
-        abuse_score, total_reports = rng.randint(55, 80), rng.randint(21, 60)
-    else:
-        abuse_score, total_reports = rng.randint(85, 100), rng.randint(61, 250)
-
-    return {
-        "status": 200,
-        "abuse_confidence_score": abuse_score,
-        "total_reports": total_reports,
-        "country_code": rng.choice(_countries),
-        "usage_type": rng.choice(["Data Center/Web Hosting/Transit", "ISP", "Fixed Line ISP"]),
-        "isp": rng.choice(_isps),
-        "domain": f"demo-isp-{seed % 999}.net",
-    }, None
-
+# ── Scoring ────────────────────────────────────────────────────────────────────
 
 def score_finding(vt: dict[str, Any] | None, abuse: dict[str, Any] | None) -> tuple[int, list[str]]:
+    """Compute a 0–100 risk score and list of reasons from enrichment data."""
     score = 0
     reasons: list[str] = []
 
@@ -620,505 +321,7 @@ def priority_from_score(score: int) -> str:
     return "low"
 
 
-def finding_to_text(finding: dict[str, Any]) -> str:
-    lines = [
-        f"IOC: {finding['ioc']}",
-        f"Type: {finding['ioc_type']}",
-        f"Risk score: {finding['risk_score']}",
-        f"Priority: {finding['priority']}",
-        f"Generated at: {finding['generated_at']}",
-        "",
-        "Reasons:",
-    ]
-    if finding["reasons"]:
-        lines.extend([f"- {reason}" for reason in finding["reasons"]])
-    else:
-        lines.append("- No strong indicators found.")
-
-    lines.extend(
-        [
-            "",
-            "VirusTotal:",
-            json.dumps(finding.get("virustotal"), indent=2, ensure_ascii=False),
-            "",
-            "AbuseIPDB:",
-            json.dumps(finding.get("abuseipdb"), indent=2, ensure_ascii=False),
-            "",
-            "Automation source: mini_soar",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def build_ticket_payload(finding: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "summary": (
-            f"[MiniSOAR][{finding['priority'].upper()}] IOC {finding['ioc']} "
-            f"({finding['ioc_type']}) score={finding['risk_score']}"
-        ),
-        "description": finding_to_text(finding),
-        "labels": ["mini-soar", "soc", finding["priority"], finding["ioc_type"]],
-    }
-
-
-def create_ticket_file(ticket_path: str, payload: dict[str, Any], finding: dict[str, Any]) -> TicketResult:
-    record = {
-        "created_at": utc_now_iso(),
-        "summary": payload["summary"],
-        "description": payload["description"],
-        "labels": payload["labels"],
-        "ioc": finding["ioc"],
-        "risk_score": finding["risk_score"],
-        "priority": finding["priority"],
-    }
-    with open(ticket_path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return TicketResult(backend="file", ok=True, reference=ticket_path)
-
-
-def create_ticket_webhook(
-    webhook_url: str,
-    webhook_token: str | None,
-    payload: dict[str, Any],
-    finding: dict[str, Any],
-    timeout: int,
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> TicketResult:
-    body = {
-        "source": "mini-soar",
-        "event": "ioc_alert",
-        "summary": payload["summary"],
-        "description": payload["description"],
-        "labels": payload["labels"],
-        "ioc": finding["ioc"],
-        "ioc_type": finding["ioc_type"],
-        "risk_score": finding["risk_score"],
-        "priority": finding["priority"],
-    }
-
-    headers = {"Accept": "application/json"}
-    if webhook_token:
-        headers["Authorization"] = f"Bearer {webhook_token}"
-
-    status, data, error = http_json_request(
-        url=webhook_url,
-        method="POST",
-        headers=headers,
-        payload=body,
-        timeout=timeout,
-        connector_name="ticket_webhook",
-        max_retries=max_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return TicketResult(backend="webhook", ok=False, error=error)
-
-    reference = None
-    if isinstance(data, dict):
-        reference = data.get("id") or data.get("ticket") or data.get("key")
-    return TicketResult(backend="webhook", ok=True, reference=str(reference or status))
-
-def create_ticket_jira(
-    base_url: str,
-    email: str,
-    api_token: str,
-    project_key: str,
-    issue_type: str,
-    payload: dict[str, Any],
-    timeout: int,
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> TicketResult:
-    jira_endpoint = f"{base_url.rstrip('/')}/rest/api/2/issue"
-    auth = base64.b64encode(f"{email}:{api_token}".encode("utf-8")).decode("utf-8")
-    headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
-    body = {
-        "fields": {
-            "project": {"key": project_key},
-            "summary": payload["summary"][:255],
-            "description": payload["description"],
-            "issuetype": {"name": issue_type},
-            "labels": payload["labels"],
-        }
-    }
-
-    status, data, error = http_json_request(
-        url=jira_endpoint,
-        method="POST",
-        headers=headers,
-        payload=body,
-        timeout=timeout,
-        connector_name="jira",
-        max_retries=max_retries,
-        retry_backoff_seconds=retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return TicketResult(backend="jira", ok=False, error=error)
-
-    reference = None
-    if isinstance(data, dict):
-        reference = data.get("key") or data.get("id")
-    return TicketResult(backend="jira", ok=status in {200, 201}, reference=str(reference or status))
-
-
-def maybe_open_ticket(
-    config: RuntimeConfig,
-    finding: dict[str, Any],
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> TicketResult | None:
-    if config.ticket_backend == "none":
-        return None
-
-    payload = build_ticket_payload(finding)
-
-    if config.ticket_backend == "file":
-        return create_ticket_file(config.ticket_file, payload, finding)
-
-    if config.ticket_backend == "webhook":
-        if not config.webhook_url:
-            return TicketResult(backend="webhook", ok=False, error="Missing webhook URL.")
-        return create_ticket_webhook(
-            webhook_url=config.webhook_url,
-            webhook_token=config.webhook_token,
-            payload=payload,
-            finding=finding,
-            timeout=config.integration_timeout or config.timeout,
-            max_retries=config.max_retries,
-            retry_backoff_seconds=config.retry_backoff_seconds,
-            correlation_id=correlation_id,
-            logger=logger,
-        )
-
-    if config.ticket_backend == "jira":
-        missing = [
-            key
-            for key, value in {
-                "JIRA_BASE_URL": config.jira_base_url,
-                "JIRA_EMAIL": config.jira_email,
-                "JIRA_API_TOKEN": config.jira_api_token,
-                "JIRA_PROJECT_KEY": config.jira_project_key,
-            }.items()
-            if not value
-        ]
-        if missing:
-            return TicketResult(
-                backend="jira",
-                ok=False,
-                error=f"Missing Jira config: {', '.join(missing)}",
-            )
-
-        return create_ticket_jira(
-            base_url=config.jira_base_url or "",
-            email=config.jira_email or "",
-            api_token=config.jira_api_token or "",
-            project_key=config.jira_project_key or "",
-            issue_type=config.jira_issue_type or "Task",
-            payload=payload,
-            timeout=config.integration_timeout or config.timeout,
-            max_retries=config.max_retries,
-            retry_backoff_seconds=config.retry_backoff_seconds,
-            correlation_id=correlation_id,
-            logger=logger,
-        )
-
-    return TicketResult(backend=config.ticket_backend, ok=False, error="Unsupported backend")
-
-
-def _severity_from_priority(priority: str) -> int:
-    return {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(priority, 2)
-
-
-def _observable_type_from_ioc(ioc_type: str) -> str:
-    return {"ip": "ip", "domain": "domain", "url": "url", "hash": "hash"}.get(ioc_type, "other")
-
-
-def _normalized_thehive_alert_endpoint(base_url: str) -> str:
-    trimmed = base_url.rstrip("/")
-    if trimmed.endswith("/api/v1/alert"):
-        return trimmed
-    return f"{trimmed}/api/v1/alert"
-
-
-def forward_to_thehive(
-    config: RuntimeConfig,
-    finding: dict[str, Any],
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> IntegrationResult:
-    if not config.thehive_url or not config.thehive_api_key:
-        return IntegrationResult(
-            target="thehive",
-            ok=False,
-            error="Missing THEHIVE_URL or THEHIVE_API_KEY.",
-        )
-
-    endpoint = _normalized_thehive_alert_endpoint(config.thehive_url)
-    source_ref = f"mini-soar-{int(time.time() * 1000)}-{abs(hash(finding['ioc'])) % 100000}"
-    payload = build_ticket_payload(finding)
-
-    body = {
-        "type": config.thehive_alert_type,
-        "source": "mini_soar",
-        "sourceRef": source_ref,
-        "title": payload["summary"][:512],
-        "description": payload["description"],
-        "severity": _severity_from_priority(finding["priority"]),
-        "tlp": int(config.thehive_tlp),
-        "pap": int(config.thehive_pap),
-        "tags": payload["labels"],
-        "observables": [
-            {
-                "dataType": _observable_type_from_ioc(finding["ioc_type"]),
-                "data": finding["ioc"],
-                "tlp": int(config.thehive_tlp),
-                "tags": payload["labels"],
-            }
-        ],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {config.thehive_api_key}",
-        "X-Api-Key": config.thehive_api_key,
-        "Accept": "application/json",
-    }
-    status, data, error = http_json_request(
-        url=endpoint,
-        method="POST",
-        headers=headers,
-        payload=body,
-        timeout=config.integration_timeout or config.timeout,
-        connector_name="thehive",
-        max_retries=config.max_retries,
-        retry_backoff_seconds=config.retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return IntegrationResult(target="thehive", ok=False, error=error)
-
-    reference = source_ref
-    if isinstance(data, dict):
-        reference = str(data.get("id") or data.get("_id") or data.get("caseId") or source_ref)
-    return IntegrationResult(target="thehive", ok=status in {200, 201}, reference=reference)
-
-
-def _normalized_splunk_event_endpoint(base_url: str) -> str:
-    trimmed = base_url.rstrip("/")
-    if trimmed.endswith("/services/collector/event"):
-        return trimmed
-    return f"{trimmed}/services/collector/event"
-
-
-def forward_to_splunk(
-    config: RuntimeConfig,
-    finding: dict[str, Any],
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> IntegrationResult:
-    if not config.splunk_hec_url or not config.splunk_hec_token:
-        return IntegrationResult(
-            target="splunk",
-            ok=False,
-            error="Missing SPLUNK_HEC_URL or SPLUNK_HEC_TOKEN.",
-        )
-
-    endpoint = _normalized_splunk_event_endpoint(config.splunk_hec_url)
-    event = {
-        "generated_at": finding["generated_at"],
-        "ioc": finding["ioc"],
-        "ioc_type": finding["ioc_type"],
-        "risk_score": finding["risk_score"],
-        "priority": finding["priority"],
-        "reasons": finding["reasons"],
-        "virustotal": finding["virustotal"],
-        "abuseipdb": finding["abuseipdb"],
-    }
-    body = {
-        "time": int(time.time()),
-        "host": "mini-soar",
-        "source": "mini_soar",
-        "sourcetype": config.splunk_sourcetype,
-        "event": event,
-    }
-    headers = {
-        "Authorization": f"Splunk {config.splunk_hec_token}",
-        "Accept": "application/json",
-    }
-    status, data, error = http_json_request(
-        url=endpoint,
-        method="POST",
-        headers=headers,
-        payload=body,
-        timeout=config.integration_timeout or config.timeout,
-        connector_name="splunk",
-        max_retries=config.max_retries,
-        retry_backoff_seconds=config.retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return IntegrationResult(target="splunk", ok=False, error=error)
-
-    ok = status == 200
-    reference = str(status)
-    if isinstance(data, dict):
-        ok = ok and int(data.get("code", 1)) == 0
-        reference = str(data.get("text") or status)
-    return IntegrationResult(target="splunk", ok=ok, reference=reference)
-
-def _build_sentinel_signature(
-    workspace_id: str,
-    shared_key: str,
-    date_rfc1123: str,
-    content_length: int,
-    method: str,
-    content_type: str,
-    resource: str,
-) -> str:
-    x_headers = f"x-ms-date:{date_rfc1123}"
-    string_to_hash = f"{method}\n{content_length}\n{content_type}\n{x_headers}\n{resource}"
-    decoded_key = base64.b64decode(shared_key)
-    encoded_hash = base64.b64encode(
-        hmac.new(decoded_key, string_to_hash.encode("utf-8"), digestmod=hashlib.sha256).digest()
-    ).decode("utf-8")
-    return f"SharedKey {workspace_id}:{encoded_hash}"
-
-
-def _normalized_sentinel_endpoint(config: RuntimeConfig) -> str:
-    if config.sentinel_endpoint:
-        return config.sentinel_endpoint
-    return (
-        f"https://{config.sentinel_workspace_id}.ods.opinsights.azure.com/"
-        "api/logs?api-version=2016-04-01"
-    )
-
-
-def forward_to_sentinel(
-    config: RuntimeConfig,
-    finding: dict[str, Any],
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> IntegrationResult:
-    if not config.sentinel_workspace_id or not config.sentinel_shared_key:
-        return IntegrationResult(
-            target="sentinel",
-            ok=False,
-            error="Missing SENTINEL_WORKSPACE_ID or SENTINEL_SHARED_KEY.",
-        )
-
-    endpoint = _normalized_sentinel_endpoint(config)
-    resource = "/api/logs"
-    content_type = "application/json"
-    date_rfc1123 = utc_now_rfc1123()
-
-    log_record = {
-        "generated_at": finding["generated_at"],
-        "ioc": finding["ioc"],
-        "ioc_type": finding["ioc_type"],
-        "risk_score": finding["risk_score"],
-        "priority": finding["priority"],
-        "reasons": finding["reasons"],
-        "virustotal": finding["virustotal"],
-        "abuseipdb": finding["abuseipdb"],
-        "source": "mini-soar",
-    }
-    body = json.dumps([log_record], ensure_ascii=False).encode("utf-8")
-
-    signature = _build_sentinel_signature(
-        workspace_id=config.sentinel_workspace_id,
-        shared_key=config.sentinel_shared_key,
-        date_rfc1123=date_rfc1123,
-        content_length=len(body),
-        method="POST",
-        content_type=content_type,
-        resource=resource,
-    )
-
-    headers = {
-        "Content-Type": content_type,
-        "Authorization": signature,
-        "Log-Type": config.sentinel_log_type,
-        "x-ms-date": date_rfc1123,
-        "time-generated-field": "generated_at",
-    }
-    status, _, error = http_raw_request(
-        url=endpoint,
-        method="POST",
-        headers=headers,
-        body=body,
-        timeout=config.integration_timeout or config.timeout,
-        connector_name="sentinel",
-        max_retries=config.max_retries,
-        retry_backoff_seconds=config.retry_backoff_seconds,
-        correlation_id=correlation_id,
-        logger=logger,
-    )
-    if error:
-        return IntegrationResult(target="sentinel", ok=False, error=error)
-    return IntegrationResult(target="sentinel", ok=status in {200, 202}, reference=str(status))
-
-
-IntegrationHandler = Any
-INTEGRATION_PLUGIN_REGISTRY: dict[str, IntegrationHandler] = {}
-_LOADED_PLUGIN_MODULES: set[str] = set()
-
-
-def register_integration_plugin(name: str, handler: IntegrationHandler) -> None:
-    INTEGRATION_PLUGIN_REGISTRY[name] = handler
-
-
-def load_plugins_from_env(logger: logging.Logger | None = None) -> None:
-    raw_modules = os.getenv("MINI_SOAR_PLUGIN_MODULES", "")
-    if not raw_modules.strip():
-        return
-
-    for module_name in [item.strip() for item in raw_modules.split(",") if item.strip()]:
-        if module_name in _LOADED_PLUGIN_MODULES:
-            continue
-        try:
-            importlib.import_module(module_name)
-            _LOADED_PLUGIN_MODULES.add(module_name)
-            if logger:
-                log_event(logger, logging.INFO, "plugin_loaded", connector=module_name)
-        except Exception as exc:
-            if logger:
-                log_event(logger, logging.ERROR, "plugin_load_failed", connector=module_name, error=str(exc))
-
-
-def forward_to_integrations(
-    config: RuntimeConfig,
-    finding: dict[str, Any],
-    correlation_id: str | None = None,
-    logger: logging.Logger | None = None,
-) -> list[IntegrationResult]:
-    results: list[IntegrationResult] = []
-    for target in config.integration_targets:
-        handler = INTEGRATION_PLUGIN_REGISTRY.get(target)
-        if not handler:
-            results.append(IntegrationResult(target=target, ok=False, error="Unsupported integration target."))
-            continue
-        try:
-            result = handler(config, finding, correlation_id=correlation_id, logger=logger)
-            results.append(result)
-        except Exception as exc:  # Defensive boundary for plugin failures.
-            results.append(IntegrationResult(target=target, ok=False, error=str(exc)))
-    return results
-
-
-register_integration_plugin("thehive", forward_to_thehive)
-register_integration_plugin("splunk", forward_to_splunk)
-register_integration_plugin("sentinel", forward_to_sentinel)
-
+# ── Pipeline ───────────────────────────────────────────────────────────────────
 
 def process_ioc(
     ioc: str,
@@ -1127,6 +330,7 @@ def process_ioc(
     correlation_id: str | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
+    """Enrich a single IOC and produce a finding dict."""
     local_store = store or NullStore()
     local_logger = logger or get_logger("mini_soar.core")
     ioc_type = detect_ioc_type(ioc)
@@ -1155,14 +359,8 @@ def process_ioc(
         if config.persist_findings:
             local_store.save_finding(correlation_id or "no-correlation-id", finding)
         IOCS_PROCESSED_TOTAL.labels(ioc_type=ioc_type, priority="low").inc()
-        log_event(
-            local_logger,
-            logging.INFO,
-            "ioc_skipped_idempotency",
-            correlation_id=correlation_id,
-            ioc=ioc,
-            ioc_type=ioc_type,
-        )
+        log_event(local_logger, logging.INFO, "ioc_skipped_idempotency",
+                  correlation_id=correlation_id, ioc=ioc, ioc_type=ioc_type)
         return finding
 
     vt_data: dict[str, Any] | None = None
@@ -1179,28 +377,23 @@ def process_ioc(
     else:
         if config.vt_api_key:
             vt_data, vt_error = virustotal_lookup(
-                ioc,
-                ioc_type,
-                config.vt_api_key,
+                ioc, ioc_type, config.vt_api_key,
                 timeout=config.vt_timeout or config.timeout,
                 max_retries=config.max_retries,
                 retry_backoff_seconds=config.retry_backoff_seconds,
-                correlation_id=correlation_id,
-                logger=local_logger,
+                correlation_id=correlation_id, logger=local_logger,
             )
             if vt_error:
                 errors.append(f"VirusTotal: {vt_error}")
 
         if config.abuse_api_key and ioc_type == "ip":
             abuse_data, abuse_error = abuseipdb_lookup(
-                ioc,
-                config.abuse_api_key,
+                ioc, config.abuse_api_key,
                 max_age_days=config.abuse_max_age,
                 timeout=config.abuse_timeout or config.timeout,
                 max_retries=config.max_retries,
                 retry_backoff_seconds=config.retry_backoff_seconds,
-                correlation_id=correlation_id,
-                logger=local_logger,
+                correlation_id=correlation_id, logger=local_logger,
             )
             if abuse_error:
                 errors.append(f"AbuseIPDB: {abuse_error}")
@@ -1226,20 +419,16 @@ def process_ioc(
 
     if risk_score >= config.ticket_threshold:
         ticket_result = maybe_open_ticket(
-            config=config,
-            finding=finding,
-            correlation_id=correlation_id,
-            logger=local_logger,
+            config=config, finding=finding,
+            correlation_id=correlation_id, logger=local_logger,
         )
         if ticket_result:
             finding["ticket"] = asdict(ticket_result)
 
     if config.integration_targets and risk_score >= config.integration_threshold:
         integration_results = forward_to_integrations(
-            config=config,
-            finding=finding,
-            correlation_id=correlation_id,
-            logger=local_logger,
+            config=config, finding=finding,
+            correlation_id=correlation_id, logger=local_logger,
         )
         finding["integrations"] = [asdict(result) for result in integration_results]
 
@@ -1251,17 +440,10 @@ def process_ioc(
         local_store.save_finding(correlation_id or "no-correlation-id", finding)
 
     IOCS_PROCESSED_TOTAL.labels(ioc_type=ioc_type, priority=priority).inc()
-    log_event(
-        local_logger,
-        logging.INFO,
-        "ioc_processed",
-        correlation_id=correlation_id,
-        ioc=ioc,
-        ioc_type=ioc_type,
-        risk_score=risk_score,
-        priority=priority,
-        error="; ".join(errors)[:500] if errors else None,
-    )
+    log_event(local_logger, logging.INFO, "ioc_processed",
+              correlation_id=correlation_id, ioc=ioc, ioc_type=ioc_type,
+              risk_score=risk_score, priority=priority,
+              error="; ".join(errors)[:500] if errors else None)
     return finding
 
 
@@ -1273,6 +455,7 @@ def run_pipeline(
     store: BaseStore | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
+    """Run the full IOC enrichment pipeline and return a report dict."""
     local_logger = logger or get_logger("mini_soar.core")
     load_plugins_from_env(local_logger)
     started = time.perf_counter()
@@ -1282,13 +465,8 @@ def run_pipeline(
             local_store = store or create_store(config.database_url)
         except Exception as exc:
             local_store = NullStore()
-            log_event(
-                local_logger,
-                logging.ERROR,
-                "store_init_failed",
-                correlation_id=correlation_id,
-                error=str(exc),
-            )
+            log_event(local_logger, logging.ERROR, "store_init_failed",
+                      correlation_id=correlation_id, error=str(exc))
 
         findings: list[dict[str, Any]] = []
         opened_tickets = 0
@@ -1297,30 +475,26 @@ def run_pipeline(
             raise ValueError(f"Unsupported ticket backend: {config.ticket_backend}")
 
         valid_targets = set(INTEGRATION_CHOICES).union(set(INTEGRATION_PLUGIN_REGISTRY.keys()))
-        invalid_targets = [target for target in config.integration_targets if target not in valid_targets]
+        invalid_targets = [t for t in config.integration_targets if t not in valid_targets]
         if invalid_targets:
             raise ValueError(f"Unsupported integration targets: {', '.join(sorted(set(invalid_targets)))}")
 
         for index, ioc in enumerate(iocs, start=1):
             finding = process_ioc(
-                ioc=ioc,
-                config=config,
-                store=local_store,
-                correlation_id=correlation_id,
-                logger=local_logger,
+                ioc=ioc, config=config, store=local_store,
+                correlation_id=correlation_id, logger=local_logger,
             )
             findings.append(finding)
 
-            ticket_ok = bool(finding["ticket"] and finding["ticket"].get("ok"))
-            if ticket_ok:
+            if finding["ticket"] and finding["ticket"].get("ok"):
                 opened_tickets += 1
 
             if progress:
-                integrations_sent = len(finding["integrations"])
                 print(
                     f"[{index}/{len(iocs)}] {finding['ioc']} ({finding['ioc_type']}) -> "
                     f"score={finding['risk_score']}, priority={finding['priority']}, "
-                    f"ticket={'yes' if finding['ticket'] else 'no'}, integrations={integrations_sent}"
+                    f"ticket={'yes' if finding['ticket'] else 'no'}, "
+                    f"integrations={len(finding['integrations'])}"
                 )
 
             if config.sleep > 0 and index < len(iocs):
@@ -1328,9 +502,8 @@ def run_pipeline(
 
         integration_attempts = sum(len(f["integrations"]) for f in findings)
         integration_success = sum(
-            1 for f in findings for integration in f["integrations"] if integration.get("ok", False)
+            1 for f in findings for i in f["integrations"] if i.get("ok", False)
         )
-        integration_failed = integration_attempts - integration_success
 
         report = {
             "generated_at": utc_now_iso(),
@@ -1348,10 +521,9 @@ def run_pipeline(
                 "integration_threshold": config.integration_threshold,
                 "integration_attempts": integration_attempts,
                 "integration_success": integration_success,
-                "integration_failed": integration_failed,
+                "integration_failed": integration_attempts - integration_success,
                 "avg_risk_score": round(
-                    (sum(f["risk_score"] for f in findings) / len(findings)) if findings else 0.0,
-                    2,
+                    (sum(f["risk_score"] for f in findings) / len(findings)) if findings else 0.0, 2
                 ),
             },
             "findings": findings,
@@ -1364,15 +536,12 @@ def run_pipeline(
         elapsed = time.perf_counter() - started
         PIPELINE_RUNS_TOTAL.labels(status=pipeline_status).inc()
         PIPELINE_DURATION_SECONDS.observe(elapsed)
-        log_event(
-            local_logger,
-            logging.INFO,
-            "pipeline_completed",
-            correlation_id=correlation_id,
-            duration_ms=round(elapsed * 1000, 2),
-            error=None if pipeline_status == "ok" else "pipeline_error",
-        )
+        log_event(local_logger, logging.INFO, "pipeline_completed",
+                  correlation_id=correlation_id, duration_ms=round(elapsed * 1000, 2),
+                  error=None if pipeline_status == "ok" else "pipeline_error")
 
+
+# ── Output ─────────────────────────────────────────────────────────────────────
 
 def write_report_json(report: dict[str, Any], output_path: str) -> None:
     with open(output_path, "w", encoding="utf-8") as handle:
@@ -1386,66 +555,37 @@ def write_metrics_csv(report: dict[str, Any], csv_path: str) -> None:
         abuse = finding.get("abuseipdb") or {}
         ticket = finding.get("ticket") or {}
         integrations = finding.get("integrations") or []
-        integration_ok = sum(1 for item in integrations if item.get("ok"))
-        integration_fail = sum(1 for item in integrations if not item.get("ok"))
-
-        rows.append(
-            {
-                "correlation_id": finding.get("correlation_id"),
-                "generated_at": finding.get("generated_at"),
-                "ioc": finding.get("ioc"),
-                "ioc_type": finding.get("ioc_type"),
-                "risk_score": finding.get("risk_score"),
-                "priority": finding.get("priority"),
-                "skipped": finding.get("skipped"),
-                "error_count": len(finding.get("errors", [])),
-                "ticket_backend": ticket.get("backend"),
-                "ticket_ok": ticket.get("ok"),
-                "ticket_reference": ticket.get("reference"),
-                "vt_malicious": vt_stats.get("malicious"),
-                "vt_suspicious": vt_stats.get("suspicious"),
-                "vt_harmless": vt_stats.get("harmless"),
-                "vt_undetected": vt_stats.get("undetected"),
-                "abuse_confidence_score": abuse.get("abuse_confidence_score"),
-                "abuse_total_reports": abuse.get("total_reports"),
-                "integrations_sent": len(integrations),
-                "integrations_ok": integration_ok,
-                "integrations_fail": integration_fail,
-            }
-        )
+        rows.append({
+            "correlation_id": finding.get("correlation_id"),
+            "generated_at": finding.get("generated_at"),
+            "ioc": finding.get("ioc"),
+            "ioc_type": finding.get("ioc_type"),
+            "risk_score": finding.get("risk_score"),
+            "priority": finding.get("priority"),
+            "skipped": finding.get("skipped"),
+            "error_count": len(finding.get("errors", [])),
+            "ticket_backend": ticket.get("backend"),
+            "ticket_ok": ticket.get("ok"),
+            "ticket_reference": ticket.get("reference"),
+            "vt_malicious": vt_stats.get("malicious"),
+            "vt_suspicious": vt_stats.get("suspicious"),
+            "vt_harmless": vt_stats.get("harmless"),
+            "vt_undetected": vt_stats.get("undetected"),
+            "abuse_confidence_score": abuse.get("abuse_confidence_score"),
+            "abuse_total_reports": abuse.get("total_reports"),
+            "integrations_sent": len(integrations),
+            "integrations_ok": sum(1 for i in integrations if i.get("ok")),
+            "integrations_fail": sum(1 for i in integrations if not i.get("ok")),
+        })
 
     fieldnames = [
-        "correlation_id",
-        "generated_at",
-        "ioc",
-        "ioc_type",
-        "risk_score",
-        "priority",
-        "skipped",
-        "error_count",
-        "ticket_backend",
-        "ticket_ok",
-        "ticket_reference",
-        "vt_malicious",
-        "vt_suspicious",
-        "vt_harmless",
-        "vt_undetected",
-        "abuse_confidence_score",
-        "abuse_total_reports",
-        "integrations_sent",
-        "integrations_ok",
-        "integrations_fail",
+        "correlation_id", "generated_at", "ioc", "ioc_type", "risk_score", "priority",
+        "skipped", "error_count", "ticket_backend", "ticket_ok", "ticket_reference",
+        "vt_malicious", "vt_suspicious", "vt_harmless", "vt_undetected",
+        "abuse_confidence_score", "abuse_total_reports",
+        "integrations_sent", "integrations_ok", "integrations_fail",
     ]
-
     with open(csv_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def runtime_config_to_dict(config: RuntimeConfig) -> dict[str, Any]:
-    return asdict(config)
-
-
-def runtime_config_from_dict(payload: dict[str, Any]) -> RuntimeConfig:
-    return RuntimeConfig(**payload)

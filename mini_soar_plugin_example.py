@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mini_soar_core import IntegrationResult, RuntimeConfig, register_integration_plugin, utc_now_iso
+from mini_soar_core import RuntimeConfig
+from mini_soar_enrichment import utc_now_iso
+from mini_soar_integrations import IntegrationResult, register_integration_plugin
 
 
 def _example_sink(
