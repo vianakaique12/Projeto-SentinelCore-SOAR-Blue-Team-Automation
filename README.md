@@ -91,6 +91,22 @@ IOCs sensíveis estão parcialmente censurados (`xx` / `[.]` / `[:]`).
 
 > Veja um relatório completo de exemplo: [example_report.json](example_report.json)
 
+## Screenshots
+
+![CLI Output](docs/screenshots/cli_output.png)
+![API Docs](docs/screenshots/api_docs.png)
+![Report JSON](docs/screenshots/report_example.png)
+
+> Para gerar screenshots, rode o pipeline e capture a saída do terminal e a página `/docs` da API.
+> ```
+> # Terminal — saída CLI
+> python mini_soar.py --input iocs.txt --ticket-backend file --output report.json
+>
+> # API Docs — abra no browser após subir o servidor
+> uvicorn mini_soar_api:app --port 8000
+> # Acesse: http://127.0.0.1:8000/docs
+> ```
+
 ## Arquitetura
 
 ```mermaid
