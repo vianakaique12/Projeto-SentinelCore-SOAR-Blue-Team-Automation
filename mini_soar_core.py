@@ -107,6 +107,7 @@ class RuntimeConfig:
 
     log_level: str = "INFO"
     json_logs: bool = True
+    demo_mode: bool = False
 
 
 def utc_now_iso() -> str:
@@ -170,6 +171,7 @@ def build_config_from_env() -> RuntimeConfig:
         persist_findings=os.getenv("MINI_SOAR_PERSIST_FINDINGS", "true").lower() == "true",
         log_level=os.getenv("MINI_SOAR_LOG_LEVEL", "INFO"),
         json_logs=os.getenv("MINI_SOAR_JSON_LOGS", "true").lower() == "true",
+        demo_mode=os.getenv("MINI_SOAR_DEMO_MODE", "false").lower() == "true",
     )
 
 
@@ -481,6 +483,74 @@ def abuseipdb_lookup(
         "usage_type": details.get("usageType"),
         "isp": details.get("isp"),
         "domain": details.get("domain"),
+    }, None
+
+
+def _demo_seed(ioc: str) -> int:
+    return int(hashlib.md5(ioc.encode("utf-8")).hexdigest(), 16)
+
+
+def virustotal_mock(ioc: str, ioc_type: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Deterministic mock for VirusTotal. Same IOC always produces same result."""
+    if ioc_type not in {"ip", "domain", "url", "hash"}:
+        return None, f"VirusTotal does not support IOC type '{ioc_type}'."
+
+    seed = _demo_seed(ioc)
+    rng = random.Random(seed)
+    tier = seed % 4  # 0=low, 1=medium, 2=high, 3=critical
+
+    if tier == 0:
+        malicious, suspicious, harmless = rng.randint(0, 1), rng.randint(0, 2), rng.randint(55, 70)
+    elif tier == 1:
+        malicious, suspicious, harmless = rng.randint(2, 4), rng.randint(1, 4), rng.randint(35, 55)
+    elif tier == 2:
+        malicious, suspicious, harmless = rng.randint(5, 9), rng.randint(2, 6), rng.randint(10, 30)
+    else:
+        malicious, suspicious, harmless = rng.randint(10, 20), rng.randint(3, 8), rng.randint(0, 10)
+
+    undetected = max(0, 72 - harmless - malicious - suspicious)
+    reputation = -(malicious * 3) if malicious > 0 else rng.randint(0, 10)
+
+    return {
+        "status": 200,
+        "analysis_stats": {
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected,
+        },
+        "reputation": reputation,
+        "last_analysis_date": int(time.time()) - rng.randint(0, 86400 * 30),
+        "permalink": f"https://www.virustotal.com/gui/search/{urllib.parse.quote(ioc)}",
+    }, None
+
+
+def abuseipdb_mock(ioc: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Deterministic mock for AbuseIPDB. Same IOC always produces same result."""
+    seed = _demo_seed(ioc)
+    rng = random.Random(seed)
+    tier = seed % 4
+
+    _countries = ["BR", "US", "CN", "RU", "DE", "NL", "UA", "KR", "IN", "FR"]
+    _isps = ["Amazon AWS", "Google Cloud", "DigitalOcean", "OVH SAS", "Hetzner Online", "Cloudflare"]
+
+    if tier == 0:
+        abuse_score, total_reports = rng.randint(0, 15), rng.randint(0, 5)
+    elif tier == 1:
+        abuse_score, total_reports = rng.randint(20, 50), rng.randint(6, 20)
+    elif tier == 2:
+        abuse_score, total_reports = rng.randint(55, 80), rng.randint(21, 60)
+    else:
+        abuse_score, total_reports = rng.randint(85, 100), rng.randint(61, 250)
+
+    return {
+        "status": 200,
+        "abuse_confidence_score": abuse_score,
+        "total_reports": total_reports,
+        "country_code": rng.choice(_countries),
+        "usage_type": rng.choice(["Data Center/Web Hosting/Transit", "ISP", "Fixed Line ISP"]),
+        "isp": rng.choice(_isps),
+        "domain": f"demo-isp-{seed % 999}.net",
     }, None
 
 
@@ -1098,33 +1168,42 @@ def process_ioc(
     vt_data: dict[str, Any] | None = None
     abuse_data: dict[str, Any] | None = None
 
-    if config.vt_api_key:
-        vt_data, vt_error = virustotal_lookup(
-            ioc,
-            ioc_type,
-            config.vt_api_key,
-            timeout=config.vt_timeout or config.timeout,
-            max_retries=config.max_retries,
-            retry_backoff_seconds=config.retry_backoff_seconds,
-            correlation_id=correlation_id,
-            logger=local_logger,
-        )
+    if config.demo_mode:
+        vt_data, vt_error = virustotal_mock(ioc, ioc_type)
         if vt_error:
-            errors.append(f"VirusTotal: {vt_error}")
+            errors.append(f"VirusTotal (demo): {vt_error}")
+        if ioc_type == "ip":
+            abuse_data, abuse_error = abuseipdb_mock(ioc)
+            if abuse_error:
+                errors.append(f"AbuseIPDB (demo): {abuse_error}")
+    else:
+        if config.vt_api_key:
+            vt_data, vt_error = virustotal_lookup(
+                ioc,
+                ioc_type,
+                config.vt_api_key,
+                timeout=config.vt_timeout or config.timeout,
+                max_retries=config.max_retries,
+                retry_backoff_seconds=config.retry_backoff_seconds,
+                correlation_id=correlation_id,
+                logger=local_logger,
+            )
+            if vt_error:
+                errors.append(f"VirusTotal: {vt_error}")
 
-    if config.abuse_api_key and ioc_type == "ip":
-        abuse_data, abuse_error = abuseipdb_lookup(
-            ioc,
-            config.abuse_api_key,
-            max_age_days=config.abuse_max_age,
-            timeout=config.abuse_timeout or config.timeout,
-            max_retries=config.max_retries,
-            retry_backoff_seconds=config.retry_backoff_seconds,
-            correlation_id=correlation_id,
-            logger=local_logger,
-        )
-        if abuse_error:
-            errors.append(f"AbuseIPDB: {abuse_error}")
+        if config.abuse_api_key and ioc_type == "ip":
+            abuse_data, abuse_error = abuseipdb_lookup(
+                ioc,
+                config.abuse_api_key,
+                max_age_days=config.abuse_max_age,
+                timeout=config.abuse_timeout or config.timeout,
+                max_retries=config.max_retries,
+                retry_backoff_seconds=config.retry_backoff_seconds,
+                correlation_id=correlation_id,
+                logger=local_logger,
+            )
+            if abuse_error:
+                errors.append(f"AbuseIPDB: {abuse_error}")
 
     risk_score, reasons = score_finding(vt_data, abuse_data)
     priority = priority_from_score(risk_score)
@@ -1256,6 +1335,7 @@ def run_pipeline(
         report = {
             "generated_at": utc_now_iso(),
             "correlation_id": correlation_id,
+            "demo_mode": config.demo_mode,
             "summary": {
                 "total_iocs": len(iocs),
                 "with_errors": sum(1 for f in findings if f["errors"]),

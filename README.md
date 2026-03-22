@@ -30,15 +30,95 @@ Este projeto demonstra competências práticas cobradas em vagas de Cybersecurit
 
 ## Arquitetura
 
-- `mini_soar.py`: CLI + modo didático interativo
-- `mini_soar_core.py`: pipeline principal
-- `mini_soar_api.py`: API FastAPI (`/analyze`, `/analyze/async`, `/jobs/{id}`, `/metrics`)
-- `mini_soar_queue.py`: fila assíncrona (RQ/Redis)
-- `mini_soar_worker.py`: worker de jobs
-- `mini_soar_storage.py`: persistência/idempotência (SQLite/Postgres)
-- `mini_soar_observability.py`: logs estruturados + métricas Prometheus
-- `mini_soar_mitre.py`: mapeamento ATT&CK + runbook
-- `tests/`: suíte pytest
+```mermaid
+flowchart TD
+    %% ── INPUT LAYER ──────────────────────────────────────────
+    CLI["🖥️ CLI\nmini_soar.py\n--input iocs.txt"]:::input
+    API["🌐 REST API\nmini_soar_api.py\nPOST /analyze"]:::input
+    ASYNC["⚡ Async API\nPOST /analyze/async"]:::input
+
+    %% ── QUEUE LAYER ──────────────────────────────────────────
+    REDIS["🗄️ Redis Queue\nmini_soar_queue.py"]:::queue
+    WORKER["⚙️ RQ Worker\nmini_soar_worker.py"]:::queue
+
+    %% ── CORE PIPELINE ────────────────────────────────────────
+    DETECT["🔍 Detect IOC Type\nip · domain · url · hash"]:::core
+    IDEM["🔁 Idempotency Check\nmini_soar_storage.py"]:::core
+    ENRICH["🔬 Enrichment Engine"]:::core
+    SCORE["📊 Scoring Engine\n0–100 risk score"]:::core
+    PRIO["🎯 Prioritizer\nlow · medium · high · critical"]:::core
+    MITRE["🛡️ MITRE ATT&CK\nmini_soar_mitre.py\n+ Runbook"]:::core
+
+    %% ── EXTERNAL APIs ────────────────────────────────────────
+    VT["☁️ VirusTotal API\nmalicious detections"]:::external
+    ABUSE["☁️ AbuseIPDB API\nabuse confidence score"]:::external
+
+    %% ── TICKETING ────────────────────────────────────────────
+    TICK{"score ≥ threshold?"}:::decision
+    TFILE["📄 File Ticket\ntickets.jsonl"]:::output
+    WEBHOOK["🔗 Webhook"]:::output
+    JIRA["🎫 Jira Issue"]:::output
+
+    %% ── INTEGRATIONS ─────────────────────────────────────────
+    INTEG{"score ≥ threshold?"}:::decision
+    HIVE["🐝 TheHive Alert"]:::output
+    SPLUNK["📡 Splunk HEC"]:::output
+    SENTINEL["🔷 Azure Sentinel"]:::output
+
+    %% ── PERSISTENCE & OBSERVABILITY ─────────────────────────
+    DB["🗃️ SQLite / Postgres\nmini_soar_storage.py"]:::storage
+    OBS["📈 Observability\nmini_soar_observability.py\nLogs JSON · Prometheus /metrics"]:::storage
+
+    %% ── OUTPUT ───────────────────────────────────────────────
+    REPORT["📋 Report JSON\n+ Metrics CSV"]:::result
+
+    %% ── FLOWS ────────────────────────────────────────────────
+    CLI -->|"IOC list"| DETECT
+    API -->|"IOC(s)"| DETECT
+    ASYNC -->|"IOC(s)"| REDIS
+    REDIS -->|"dequeue"| WORKER
+    WORKER -->|"IOC(s)"| DETECT
+
+    DETECT -->|"typed IOC"| IDEM
+    IDEM -->|"not seen before"| ENRICH
+    IDEM -->|"already processed"| REPORT
+
+    ENRICH -->|"query"| VT
+    ENRICH -->|"query"| ABUSE
+    VT -->|"detections"| SCORE
+    ABUSE -->|"abuse score"| SCORE
+
+    SCORE -->|"0–100"| PRIO
+    PRIO -->|"priority level"| MITRE
+    MITRE -->|"techniques + runbook"| TICK
+
+    TICK -->|"yes"| TFILE
+    TICK -->|"yes"| WEBHOOK
+    TICK -->|"yes"| JIRA
+    TICK -->|"finding"| INTEG
+
+    INTEG -->|"yes"| HIVE
+    INTEG -->|"yes"| SPLUNK
+    INTEG -->|"yes"| SENTINEL
+    INTEG -->|"finding"| DB
+
+    DB -->|"persisted"| OBS
+    OBS -->|"metrics + logs"| REPORT
+```
+
+### Módulos
+
+| Arquivo | Responsabilidade |
+|---|---|
+| `mini_soar.py` | CLI + modo interativo |
+| `mini_soar_core.py` | Pipeline principal — orquestra todo o fluxo |
+| `mini_soar_api.py` | API FastAPI (`/analyze`, `/analyze/async`, `/jobs/{id}`, `/metrics`) |
+| `mini_soar_queue.py` | Fila assíncrona (RQ/Redis) |
+| `mini_soar_worker.py` | Worker que consome a fila |
+| `mini_soar_storage.py` | Persistência e idempotência (SQLite/Postgres) |
+| `mini_soar_observability.py` | Logs estruturados + métricas Prometheus |
+| `mini_soar_mitre.py` | Mapeamento MITRE ATT&CK + runbook de resposta |
+| `tests/` | Suíte pytest |
 
 ## Rodar em 1 comando (Docker)
 
@@ -59,6 +139,31 @@ Endpoints:
 - Docs: `http://127.0.0.1:8000/docs`
 - Health: `http://127.0.0.1:8000/health`
 - Metrics: `http://127.0.0.1:8000/metrics`
+
+## Modo Demo (sem API keys)
+
+Quer testar o fluxo completo sem precisar de chaves reais? Ative o modo demo:
+
+```powershell
+# CLI
+$env:MINI_SOAR_DEMO_MODE="true"
+python .\mini_soar.py --input .\iocs.txt --ticket-backend none --output .\report.json
+```
+
+```powershell
+# API
+$env:MINI_SOAR_DEMO_MODE="true"
+uvicorn mini_soar_api:app --host 0.0.0.0 --port 8000
+```
+
+No modo demo:
+- O enriquecimento é **simulado** — nenhuma chamada externa é feita
+- Os dados são **determinísticos**: o mesmo IOC sempre gera o mesmo score
+- Os resultados cobrem todas as faixas: `low`, `medium`, `high` e `critical`
+- O relatório JSON inclui `"demo_mode": true`
+- O endpoint `/health` indica `"enrichment": "mock (demo)"`
+
+> ⚠️ Dados simulados não representam inteligência de ameaças real.
 
 ## Uso rápido (sem Docker)
 

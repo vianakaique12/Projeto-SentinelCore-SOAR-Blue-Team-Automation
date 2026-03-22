@@ -274,6 +274,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         persist_findings=False if args.disable_persistence else env_cfg.persist_findings,
         log_level=str(choose(args.log_level, env_cfg.log_level)),
         json_logs=False if args.plain_logs else env_cfg.json_logs,
+        demo_mode=env_cfg.demo_mode,
     )
 
 
@@ -292,7 +293,9 @@ def main() -> int:
         print("[ERROR] No IOCs provided. Use --ioc and/or --input.", file=sys.stderr)
         return 2
 
-    if not config.vt_api_key and not config.abuse_api_key:
+    if config.demo_mode:
+        print("[DEMO] Running in DEMO MODE — enrichment data is simulated, not real.", file=sys.stderr)
+    elif not config.vt_api_key and not config.abuse_api_key:
         print("[WARN] No API keys provided. Enrichment providers will not return data.", file=sys.stderr)
 
     correlation_id = os.getenv("MINI_SOAR_CORRELATION_ID", new_correlation_id())

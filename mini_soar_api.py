@@ -11,7 +11,8 @@ from collections import defaultdict
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mini_soar_core import RuntimeConfig, build_config_from_env, read_iocs, run_pipeline
@@ -225,6 +226,18 @@ def build_runtime_config_from_request(request: AnalyzeRequest) -> RuntimeConfig:
 
 app = FastAPI(title="Mini SOAR API", version="2.0.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/", include_in_schema=False)
+def dashboard() -> FileResponse:
+    return FileResponse("dashboard.html")
+
 
 @app.middleware("http")
 async def api_metrics_middleware(request: Request, call_next):
@@ -254,8 +267,13 @@ async def api_metrics_middleware(request: Request, call_next):
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    demo_mode = os.getenv("MINI_SOAR_DEMO_MODE", "false").lower() == "true"
+    return {
+        "status": "ok",
+        "demo_mode": demo_mode,
+        "enrichment": "mock (demo)" if demo_mode else "live (api keys required)",
+    }
 
 
 @app.get("/metrics")

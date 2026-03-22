@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+.git/
+.github/
+tests/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.json
+*.jsonl
+*.csv
+*.log
+.env
+

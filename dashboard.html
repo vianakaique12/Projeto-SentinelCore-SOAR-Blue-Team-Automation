@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SentinelCore SOAR Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #1c2128;
+      --border: #30363d;
+      --accent: #58a6ff;
+      --accent2: #3fb950;
+      --warn: #d29922;
+      --danger: #f85149;
+      --critical: #ff6b6b;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --low: #3fb950;
+      --medium: #d29922;
+      --high: #f85149;
+      --critical-color: #ff6b6b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+    }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header .logo {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: 1px;
+    }
+
+    header .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    header .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin-left: auto;
+      transition: background 0.3s;
+    }
+    header .status-dot.online { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+    header .status-dot.offline { background: var(--danger); }
+    header .status-label { font-size: 12px; color: var(--muted); }
+
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+
+    .input-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 28px;
+    }
+
+    .input-card h2 {
+      font-size: 15px;
+      color: var(--muted);
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 14px;
+      padding: 12px;
+      resize: vertical;
+      min-height: 100px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    textarea:focus { border-color: var(--accent); }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin-top: 14px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 10px 24px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #0d1117;
+    }
+    .btn-secondary {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .spinner {
+      display: none;
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Summary cards */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .stat-card .label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .stat-card .value {
+      font-size: 32px;
+      font-weight: 700;
+      margin-top: 6px;
+    }
+
+    /* Findings */
+    .findings-section h2 {
+      font-size: 15px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 16px;
+    }
+
+    .finding-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 16px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .finding-card:hover { border-color: var(--accent); }
+
+    .finding-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 20px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .ioc-value {
+      font-family: monospace;
+      font-size: 15px;
+      font-weight: 600;
+      flex: 1;
+      word-break: break-all;
+    }
+
+    .badge {
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .badge-type {
+      background: #1c2d3d;
+      color: var(--accent);
+      border: 1px solid #1f4f7f;
+    }
+    .badge-low    { background: #0d2018; color: var(--low);    border: 1px solid #1a4a2a; }
+    .badge-medium { background: #2d2208; color: var(--medium); border: 1px solid #5c4408; }
+    .badge-high   { background: #2d0f0e; color: var(--high);   border: 1px solid #6b1a18; }
+    .badge-critical { background: #2d0505; color: var(--critical-color); border: 1px solid #7a0a0a; }
+
+    .score-bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 140px;
+    }
+    .score-bar-bg {
+      flex: 1;
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .score-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.5s;
+    }
+    .score-text {
+      font-size: 13px;
+      font-weight: 700;
+      min-width: 34px;
+      text-align: right;
+    }
+
+    .chevron {
+      font-size: 12px;
+      color: var(--muted);
+      transition: transform 0.2s;
+    }
+    .chevron.open { transform: rotate(90deg); }
+
+    .finding-body {
+      display: none;
+      padding: 0 20px 20px;
+      border-top: 1px solid var(--border);
+    }
+    .finding-body.open { display: block; }
+
+    .body-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-top: 16px;
+    }
+    @media (max-width: 640px) { .body-grid { grid-template-columns: 1fr; } }
+
+    .body-section h4 {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+
+    .mitre-tag {
+      display: inline-block;
+      background: #1a1f2e;
+      border: 1px solid #2d3a5c;
+      color: #79b8ff;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      margin: 3px 3px 3px 0;
+      font-family: monospace;
+    }
+
+    .runbook-list {
+      list-style: none;
+      counter-reset: step;
+    }
+    .runbook-list li {
+      counter-increment: step;
+      display: flex;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--text);
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    .runbook-list li::before {
+      content: counter(step);
+      min-width: 22px;
+      height: 22px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: var(--accent);
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+    }
+    .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
+    .empty-state p { font-size: 14px; }
+
+    .error-banner {
+      background: #2d0f0e;
+      border: 1px solid #6b1a18;
+      color: var(--danger);
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: none;
+    }
+
+    .no-key-banner {
+      background: #2d2208;
+      border: 1px solid #5c4408;
+      color: var(--warn);
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      font-size: 13px;
+    }
+
+    .api-config {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .api-config input {
+      flex: 1;
+      min-width: 200px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 8px 12px;
+      outline: none;
+    }
+    .api-config input:focus { border-color: var(--warn); }
+    .api-config input::placeholder { color: var(--muted); }
+
+    footer {
+      text-align: center;
+      padding: 32px;
+      color: var(--muted);
+      font-size: 12px;
+      border-top: 1px solid var(--border);
+      margin-top: 40px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">⚡ SentinelCore</div>
+    <div class="subtitle">SOAR Blue Team Dashboard</div>
+  </div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+    <div class="status-label" id="statusLabel">Verificando API...</div>
+    <div class="status-dot" id="statusDot"></div>
+  </div>
+</header>
+
+<main>
+
+  <div class="no-key-banner">
+    ⚠️ <strong>Sem chaves de threat intel:</strong> o enriquecimento real (VirusTotal / AbuseIPDB) requer API keys. Configure abaixo para scores reais.
+    <div class="api-config">
+      <input type="password" id="vtKey" placeholder="VT_API_KEY (VirusTotal)" />
+      <input type="password" id="abuseKey" placeholder="ABUSEIPDB_API_KEY" />
+    </div>
+  </div>
+
+  <div class="input-card">
+    <h2>Analisar IOCs</h2>
+    <textarea id="iocInput" placeholder="Digite os IOCs, um por linha:
+8.8.8.8
+example.com
+http://malicious.com/payload
+d41d8cd98f00b204e9800998ecf8427e"></textarea>
+    <div class="hint">Suporta: IPs, domínios, URLs e hashes MD5/SHA256</div>
+    <div class="controls">
+      <button class="btn-primary" id="analyzeBtn" onclick="analyze()">Analisar</button>
+      <button class="btn-secondary" onclick="clearAll()">Limpar</button>
+      <div class="spinner" id="spinner"></div>
+    </div>
+  </div>
+
+  <div class="error-banner" id="errorBanner"></div>
+
+  <div id="summarySection" style="display:none">
+    <div class="summary-grid">
+      <div class="stat-card">
+        <div class="label">Total IOCs</div>
+        <div class="value" id="statTotal" style="color:var(--accent)">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Score Médio</div>
+        <div class="value" id="statAvg" style="color:var(--text)">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Alta / Crítica</div>
+        <div class="value" id="statHighCrit" style="color:var(--danger)">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Tickets Abertos</div>
+        <div class="value" id="statTickets" style="color:var(--accent2)">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Erros</div>
+        <div class="value" id="statErrors" style="color:var(--warn)">0</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="findings-section" id="findingsSection" style="display:none">
+    <h2>Findings</h2>
+    <div id="findingsList"></div>
+  </div>
+
+  <div class="empty-state" id="emptyState">
+    <div class="icon">🛡️</div>
+    <p>Cole os IOCs acima e clique em <strong>Analisar</strong></p>
+  </div>
+
+</main>
+
+<footer>
+  SentinelCore SOAR · API rodando em <span id="apiUrl">http://127.0.0.1:8000</span>
+</footer>
+
+<script>
+  const API_BASE = 'http://127.0.0.1:8000';
+
+  // Check API health on load
+  async function checkHealth() {
+    try {
+      const res = await fetch(`${API_BASE}/health`);
+      const dot = document.getElementById('statusDot');
+      const label = document.getElementById('statusLabel');
+      if (res.ok) {
+        dot.className = 'status-dot online';
+        label.textContent = 'API Online';
+      } else {
+        dot.className = 'status-dot offline';
+        label.textContent = 'API com erro';
+      }
+    } catch {
+      document.getElementById('statusDot').className = 'status-dot offline';
+      document.getElementById('statusLabel').textContent = 'API Offline';
+    }
+  }
+
+  checkHealth();
+  setInterval(checkHealth, 10000);
+
+  function priorityColor(p) {
+    if (p === 'critical') return 'var(--critical-color)';
+    if (p === 'high')     return 'var(--high)';
+    if (p === 'medium')   return 'var(--medium)';
+    return 'var(--low)';
+  }
+
+  function scoreColor(score) {
+    if (score >= 80) return 'var(--critical-color)';
+    if (score >= 60) return 'var(--high)';
+    if (score >= 40) return 'var(--medium)';
+    return 'var(--low)';
+  }
+
+  function renderFinding(f, idx) {
+    const color = priorityColor(f.priority);
+    const sc = scoreColor(f.risk_score);
+    const mitre = (f.mitre_attack || []).map(m =>
+      `<span class="mitre-tag">${m.technique_id} · ${m.name}</span>`
+    ).join('');
+    const runbook = (f.runbook_steps || []).map(s =>
+      `<li>${s}</li>`
+    ).join('');
+
+    return `
+    <div class="finding-card">
+      <div class="finding-header" onclick="toggleCard(${idx})">
+        <span class="badge badge-type">${f.ioc_type}</span>
+        <span class="ioc-value">${escHtml(f.ioc)}</span>
+        <div class="score-bar-wrap">
+          <div class="score-bar-bg">
+            <div class="score-bar-fill" style="width:${f.risk_score}%;background:${sc}"></div>
+          </div>
+          <span class="score-text" style="color:${sc}">${f.risk_score}</span>
+        </div>
+        <span class="badge badge-${f.priority}">${f.priority}</span>
+        <span class="chevron" id="chev-${idx}">▶</span>
+      </div>
+      <div class="finding-body" id="body-${idx}">
+        <div class="body-grid">
+          <div class="body-section">
+            <h4>MITRE ATT&CK</h4>
+            ${mitre || '<span style="color:var(--muted);font-size:13px">Nenhum mapeamento</span>'}
+          </div>
+          <div class="body-section">
+            <h4>Runbook de Resposta</h4>
+            <ol class="runbook-list">${runbook || '<li>Sem runbook disponível</li>'}</ol>
+          </div>
+        </div>
+        ${f.errors && f.errors.length ? `
+        <div style="margin-top:14px;padding:10px 14px;background:#2d0f0e;border-radius:6px;font-size:12px;color:var(--danger)">
+          ⚠️ Erros: ${f.errors.join(', ')}
+        </div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  function toggleCard(idx) {
+    const body = document.getElementById(`body-${idx}`);
+    const chev = document.getElementById(`chev-${idx}`);
+    body.classList.toggle('open');
+    chev.classList.toggle('open');
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  async function analyze() {
+    const raw = document.getElementById('iocInput').value.trim();
+    if (!raw) return;
+
+    const iocs = raw.split('\n').map(l => l.trim()).filter(Boolean);
+    const vtKey = document.getElementById('vtKey').value.trim();
+    const abuseKey = document.getElementById('abuseKey').value.trim();
+
+    const btn = document.getElementById('analyzeBtn');
+    const spinner = document.getElementById('spinner');
+    const errorBanner = document.getElementById('errorBanner');
+
+    btn.disabled = true;
+    spinner.style.display = 'block';
+    errorBanner.style.display = 'none';
+    document.getElementById('emptyState').style.display = 'none';
+
+    // Build headers
+    const headers = { 'Content-Type': 'application/json' };
+    if (vtKey)    headers['X-VT-API-Key']    = vtKey;
+    if (abuseKey) headers['X-Abuse-API-Key'] = abuseKey;
+
+    // Set env keys on server via query param (workaround for local use)
+    const params = new URLSearchParams();
+    if (vtKey)    params.set('vt_api_key', vtKey);
+    if (abuseKey) params.set('abuseipdb_api_key', abuseKey);
+
+    const url = `${API_BASE}/analyze/local?${params.toString()}`;
+
+    try {
+      const res = await fetch(`${API_BASE}/analyze`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ iocs, ticket_backend: 'none' })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        if (res.status === 400 && err.detail && err.detail.includes('API_KEY')) {
+          showNoKeyResults(iocs);
+          return;
+        }
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      renderResults(data);
+
+    } catch (err) {
+      if (err.message && err.message.includes('API_KEY')) {
+        showNoKeyResults(iocs);
+      } else if (err.message === 'Failed to fetch') {
+        showNoKeyResults(iocs);
+      } else {
+        showError(err.message);
+      }
+    } finally {
+      btn.disabled = false;
+      spinner.style.display = 'none';
+    }
+  }
+
+  function showNoKeyResults(iocs) {
+    // Render mock findings without enrichment (same as CLI --no-keys)
+    const findings = iocs.map(ioc => {
+      const type = detectType(ioc);
+      const mitre = mitreFor(type);
+      return {
+        ioc,
+        ioc_type: type,
+        risk_score: 0,
+        priority: 'low',
+        mitre_attack: mitre,
+        runbook_steps: runbookFor(type, ioc),
+        errors: []
+      };
+    });
+    renderResults({
+      summary: {
+        total_iocs: iocs.length,
+        avg_risk_score: 0,
+        high_or_critical: 0,
+        tickets_opened: 0,
+        with_errors: 0
+      },
+      findings
+    });
+  }
+
+  function detectType(ioc) {
+    if (/^https?:\/\//i.test(ioc)) return 'url';
+    if (/^[\da-fA-F]{32}$|^[\da-fA-F]{40}$|^[\da-fA-F]{64}$/.test(ioc)) return 'hash';
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ioc)) return 'ip';
+    return 'domain';
+  }
+
+  function mitreFor(type) {
+    const map = {
+      ip:     [{ technique_id: 'T1071', name: 'Application Layer Protocol' }, { technique_id: 'T1041', name: 'Exfiltration Over C2 Channel' }],
+      domain: [{ technique_id: 'T1566', name: 'Phishing' }, { technique_id: 'T1071.001', name: 'Application Layer Protocol: Web' }],
+      url:    [{ technique_id: 'T1566', name: 'Phishing' }, { technique_id: 'T1071.001', name: 'Application Layer Protocol: Web' }],
+      hash:   [{ technique_id: 'T1204', name: 'User Execution' }, { technique_id: 'T1059', name: 'Command and Scripting Interpreter' }],
+    };
+    return map[type] || [];
+  }
+
+  function runbookFor(type, ioc) {
+    const base = [
+      `Validar IOC '${ioc}' no SIEM/EDR e confirmar se aparece em logs recentes.`,
+      `Correlacionar com telemetria de endpoint, rede e identidade.`,
+      `Verificar se o IOC está em blocklists de threat intel.`,
+    ];
+    if (type === 'ip')   base.push('Bloquear IP no firewall/proxy se atividade maliciosa confirmada.');
+    if (type === 'domain' || type === 'url') base.push('Bloquear domínio/URL no DNS e secure web gateway.');
+    if (type === 'hash') base.push('Colocar hash em quarentena nos endpoints e iniciar triage de malware.');
+    base.push('Documentar timeline, ações e lições aprendidas no ticket de incidente.');
+    return base;
+  }
+
+  function renderResults(data) {
+    const s = data.summary;
+    document.getElementById('statTotal').textContent    = s.total_iocs || 0;
+    document.getElementById('statAvg').textContent      = (s.avg_risk_score || 0).toFixed(1);
+    document.getElementById('statHighCrit').textContent = s.high_or_critical || 0;
+    document.getElementById('statTickets').textContent  = s.tickets_opened || 0;
+    document.getElementById('statErrors').textContent   = s.with_errors || 0;
+
+    document.getElementById('summarySection').style.display = 'block';
+    document.getElementById('findingsSection').style.display = 'block';
+    document.getElementById('emptyState').style.display = 'none';
+
+    const list = document.getElementById('findingsList');
+    list.innerHTML = data.findings.map((f, i) => renderFinding(f, i)).join('');
+  }
+
+  function showError(msg) {
+    const banner = document.getElementById('errorBanner');
+    banner.textContent = '❌ ' + msg;
+    banner.style.display = 'block';
+    document.getElementById('emptyState').style.display = 'block';
+  }
+
+  function clearAll() {
+    document.getElementById('iocInput').value = '';
+    document.getElementById('findingsList').innerHTML = '';
+    document.getElementById('summarySection').style.display = 'none';
+    document.getElementById('findingsSection').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'block';
+    document.getElementById('errorBanner').style.display = 'none';
+  }
+
+  // Enter key on textarea doesn't submit (allow multiline)
+  document.getElementById('iocInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.ctrlKey) analyze();
+  });
+</script>
+
+</body>
+</html>

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Runtime outputs
+*.db
+*.jsonl
+report*.json
+metrics*.csv
+plugin_example_events.jsonl
+
+# Env/secrets
+.env
+
+# OS/editor
+.DS_Store
+Thumbs.db
+
