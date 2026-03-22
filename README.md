@@ -33,6 +33,62 @@ Este projeto demonstra competências práticas cobradas em vagas de Cybersecurit
 6. Anexa mapeamento MITRE ATT&CK + runbook de resposta.
 7. Gera relatório JSON e métricas CSV.
 
+## Exemplo de Execução Real
+
+Execução do pipeline com 5 IOCs reais contra as APIs do VirusTotal e AbuseIPDB:
+
+```
+$ python mini_soar.py --input iocs.txt --ticket-backend file --output report.json
+
+[1/5] Analyzing: 185.220.101.xx (ip)
+  → VirusTotal: 14 malicious engines
+  → AbuseIPDB: confidence 100%, 847 reports
+  → Risk score: 100 (critical)
+  → MITRE: T1071, T1041, T1486
+  → Ticket created: tickets.jsonl
+
+[2/5] Analyzing: secure-login-paypa1[.]com (domain)
+  → VirusTotal: 8 malicious engines
+  → Risk score: 78 (high)
+  → MITRE: T1566, T1071.001, T1486
+  → Ticket created: tickets.jsonl
+
+[3/5] Analyzing: http[:]//185.220.101.xx/shell.php (url)
+  → VirusTotal: 11 malicious engines
+  → Risk score: 85 (critical)
+  → MITRE: T1566, T1071.001, T1486
+  → Ticket created: tickets.jsonl
+
+[4/5] Analyzing: 44d88612fea8a8f36de82e1278abb02f (hash)
+  → VirusTotal: 62 malicious engines
+  → Risk score: 100 (critical)
+  → MITRE: T1486, T1059, T1027
+  → Ticket created: tickets.jsonl
+
+[5/5] Analyzing: 8.8.8.8 (ip)
+  → VirusTotal: 0 malicious engines
+  → AbuseIPDB: confidence 0%, 0 reports
+  → Risk score: 0 (low)
+  → Below ticket threshold (70), skipping.
+
+Pipeline complete. 5 IOCs processed in 12.4s
+Report saved: report.json | Tickets: tickets.jsonl (4 opened)
+```
+
+### Resumo dos resultados
+
+| IOC | Tipo | Score | Prioridade | VT Malicious | Abuse Confidence |
+|---|---|---|---|---|---|
+| `185.220.101.xx` | ip | **100** | 🔴 critical | 14 | 100% (847 reports) |
+| `secure-login-paypa1[.]com` | domain | **78** | 🟠 high | 8 | — |
+| `http[:]//185.220.101.xx/shell.php` | url | **85** | 🔴 critical | 11 | — |
+| `44d88612fea8a8f36de82e12...` | hash | **100** | 🔴 critical | 62 | — |
+| `8.8.8.8` | ip | **0** | 🟢 low | 0 | 0% |
+
+Os resultados acima foram gerados com dados reais das APIs do VirusTotal e AbuseIPDB.
+O pipeline detecta, enriquece, pontua e prioriza automaticamente — sem intervenção manual.
+IOCs sensíveis estão parcialmente censurados (`xx` / `[.]` / `[:]`).
+
 ## Arquitetura
 
 ```mermaid
