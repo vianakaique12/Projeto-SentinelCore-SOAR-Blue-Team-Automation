@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mini_soar_core import RuntimeConfig, build_config_from_env, read_iocs, run_pipeline
@@ -391,3 +394,78 @@ def list_findings(
     }
     findings, total = store.query_findings(filters, limit=limit, offset=offset)
     return FindingsResponse(total=total, limit=limit, offset=offset, findings=findings)
+
+
+# ── CSV export ─────────────────────────────────────────────────────────────────
+
+_CSV_COLUMNS = [
+    "generated_at", "ioc", "ioc_type", "risk_score", "priority",
+    "reasons", "vt_malicious", "vt_suspicious",
+    "abuse_confidence", "abuse_reports", "mitre_techniques",
+]
+
+
+def _finding_to_csv_row(finding: dict[str, Any]) -> dict[str, Any]:
+    vt_stats = (finding.get("virustotal") or {}).get("analysis_stats", {})
+    abuse    = finding.get("abuseipdb") or {}
+    mitre    = finding.get("mitre_attack") or []
+    return {
+        "generated_at":     finding.get("generated_at", ""),
+        "ioc":              finding.get("ioc", ""),
+        "ioc_type":         finding.get("ioc_type", ""),
+        "risk_score":       finding.get("risk_score", ""),
+        "priority":         finding.get("priority", ""),
+        "reasons":          " | ".join(finding.get("reasons") or []),
+        "vt_malicious":     vt_stats.get("malicious", ""),
+        "vt_suspicious":    vt_stats.get("suspicious", ""),
+        "abuse_confidence": abuse.get("abuse_confidence_score", ""),
+        "abuse_reports":    abuse.get("total_reports", ""),
+        "mitre_techniques": " | ".join(
+            t.get("technique_id", "") for t in mitre if isinstance(t, dict)
+        ),
+    }
+
+
+def _generate_csv(findings: list[dict[str, Any]]):
+    """Yield the CSV header then one row per finding."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    yield buf.getvalue()
+    for finding in findings:
+        buf.seek(0)
+        buf.truncate(0)
+        writer.writerow(_finding_to_csv_row(finding))
+        yield buf.getvalue()
+
+
+@app.get("/report.csv")
+def export_csv(
+    priority:  str | None = Query(default=None, description="Filter by priority"),
+    ioc_type:  str | None = Query(default=None, description="Filter by IOC type"),
+    min_score: int | None = Query(default=None, ge=0,   description="Minimum risk score"),
+    max_score: int | None = Query(default=None, le=100, description="Maximum risk score"),
+    ioc:       str | None = Query(default=None, description="Partial match on IOC value"),
+    since:     str | None = Query(default=None, description="ISO datetime lower bound"),
+    until:     str | None = Query(default=None, description="ISO datetime upper bound"),
+    _: dict[str, Any] = Depends(authorize_request),
+) -> StreamingResponse:
+    env_cfg = build_config_from_env()
+    store = create_store(env_cfg.database_url)
+    filters: dict[str, Any] = {
+        "priority":  priority,
+        "ioc_type":  ioc_type,
+        "min_score": min_score,
+        "max_score": max_score,
+        "ioc":       ioc,
+        "since":     since,
+        "until":     until,
+    }
+    findings, _ = store.query_findings(filters, limit=10_000, offset=0)
+    date_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+    filename = f"sentinelcore_report_{date_str}.csv"
+    return StreamingResponse(
+        _generate_csv(findings),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
