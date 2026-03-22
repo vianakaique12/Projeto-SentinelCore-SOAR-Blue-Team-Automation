@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
-from collections import defaultdict
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
@@ -26,6 +24,7 @@ from mini_soar_observability import (
     prometheus_payload,
 )
 from mini_soar_queue import enqueue_iocs_job, get_job_status
+from mini_soar_rate_limit import get_rate_limiter
 
 try:
     import jwt
@@ -97,35 +96,24 @@ def choose(value: object, fallback: object) -> object:
 
 
 def _rate_limit_settings() -> tuple[int, int]:
-    limit = int(os.getenv("MINI_SOAR_API_RATE_LIMIT", "60"))
+    limit  = int(os.getenv("MINI_SOAR_API_RATE_LIMIT", "60"))
     window = int(os.getenv("MINI_SOAR_API_RATE_WINDOW_SECONDS", "60"))
     return limit, window
 
 
-_rate_state: dict[str, list[float]] = defaultdict(list)
-_rate_lock = threading.Lock()
-
-
-def _cleanup_rate_bucket(now_ts: float, entries: list[float], window_seconds: int) -> list[float]:
-    cutoff = now_ts - window_seconds
-    return [value for value in entries if value >= cutoff]
+# Instantiated once at startup; backend is selected by env vars.
+_rate_limiter = get_rate_limiter()
 
 
 def enforce_rate_limit(request: Request) -> None:
     limit, window = _rate_limit_settings()
     client_id = request.client.host if request.client else "unknown"
-    now_ts = time.time()
-
-    with _rate_lock:
-        entries = _cleanup_rate_bucket(now_ts, _rate_state[client_id], window)
-        if len(entries) >= limit:
-            RATE_LIMIT_HITS_TOTAL.labels(scope="api").inc()
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Rate limit exceeded. Max {limit} requests per {window}s.",
-            )
-        entries.append(now_ts)
-        _rate_state[client_id] = entries
+    if not _rate_limiter.is_allowed(client_id, limit, window):
+        RATE_LIMIT_HITS_TOTAL.labels(scope="api").inc()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Max {limit} requests per {window}s.",
+        )
 
 
 def _allowed_api_keys() -> set[str]:

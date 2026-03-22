@@ -50,7 +50,7 @@ def test_api_auth_required_with_api_key(monkeypatch):
     monkeypatch.setenv("MINI_SOAR_REQUIRE_AUTH", "true")
     monkeypatch.setenv("MINI_SOAR_API_KEYS", "test-key")
     monkeypatch.setenv("VT_API_KEY", "dummy")
-    mini_soar_api._rate_state.clear()
+    mini_soar_api._rate_limiter.reset()
 
     monkeypatch.setattr(
         mini_soar_api,
@@ -78,7 +78,7 @@ def test_api_rate_limit(monkeypatch):
     monkeypatch.setenv("MINI_SOAR_API_RATE_LIMIT", "1")
     monkeypatch.setenv("MINI_SOAR_API_RATE_WINDOW_SECONDS", "60")
     monkeypatch.setenv("VT_API_KEY", "dummy")
-    mini_soar_api._rate_state.clear()
+    mini_soar_api._rate_limiter.reset()
 
     monkeypatch.setattr(
         mini_soar_api,

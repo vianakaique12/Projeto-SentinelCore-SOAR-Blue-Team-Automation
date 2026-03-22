@@ -322,10 +322,59 @@ Quando desabilitado, cada submissão executa o pipeline completo independentemen
 
 ---
 
+## Rate Limiting
+
+O SentinelCore aplica um limite de requisições por IP (sliding window) em todos os endpoints da API.
+
+### Backends disponíveis
+
+| Backend | Quando usar | Como ativar |
+|---|---|---|
+| `memory` (padrão) | Desenvolvimento / single worker | padrão, nenhuma config necessária |
+| `redis` | Produção / múltiplos workers | `MINI_SOAR_RATE_LIMIT_BACKEND=redis` |
+
+#### In-Memory (padrão)
+
+Usa um dicionário Python + threading.Lock dentro do processo. Funciona perfeitamente com um único worker Uvicorn.
+
+**Limitação**: com múltiplos workers (`--workers 4`), cada processo mantém seu próprio contador, então o limite efetivo por cliente se torna `limite × número_de_workers`. Um aviso é emitido no log de inicialização quando esse cenário é detectado.
+
+```bash
+# Single worker — limite exato
+uvicorn mini_soar_api:app --host 0.0.0.0 --port 8000
+```
+
+#### Redis (multi-worker / produção)
+
+Usa um sorted set no Redis com uma **Lua script atômica** para garantir que o check-and-add seja race-free. Todos os workers compartilham o mesmo contador, então o limite configurado é respeitado globalmente.
+
+Cada cliente tem uma chave `mini_soar:rl:<ip>` com TTL automático para limpeza.
+
+```bash
+# Produção com 4 workers
+MINI_SOAR_RATE_LIMIT_BACKEND=redis
+MINI_SOAR_RATE_LIMIT_REDIS_URL=redis://localhost:6379/0
+uvicorn mini_soar_api:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+Se o Redis estiver indisponível ao iniciar, o sistema faz fallback automático para in-memory com um aviso no log.
+
+### Variáveis de ambiente do rate limiting
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `MINI_SOAR_API_RATE_LIMIT` | `60` | Máximo de requests por janela |
+| `MINI_SOAR_API_RATE_WINDOW_SECONDS` | `60` | Tamanho da janela (segundos) |
+| `MINI_SOAR_RATE_LIMIT_BACKEND` | `memory` | `memory` ou `redis` |
+| `MINI_SOAR_RATE_LIMIT_REDIS_URL` | `redis://localhost:6379/0` | URL do Redis (backend redis) |
+| `WEB_CONCURRENCY` / `UVICORN_WORKERS` | `1` | Detectado para emitir aviso multi-worker |
+
+---
+
 ## Segurança e confiabilidade
 
 - API Key/JWT (configurável por env)
-- Rate limiting por cliente
+- Rate limiting por cliente (in-memory ou Redis para multi-worker)
 - Retry com backoff para conectores externos
 - Idempotência para reduzir alert storm
 - Persistência de findings (SQLite ou Postgres)
