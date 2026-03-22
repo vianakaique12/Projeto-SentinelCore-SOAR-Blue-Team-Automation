@@ -1,5 +1,10 @@
 # Mini SOAR for SOC (Python)
 
+[![CI](https://github.com/vianakaique12/Projeto-SentinelCore-SOAR-Blue-Team-Automation/actions/workflows/ci.yml/badge.svg)](https://github.com/vianakaique12/Projeto-SentinelCore-SOAR-Blue-Team-Automation/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/vianakaique12/Projeto-SentinelCore-SOAR-Blue-Team-Automation/branch/master/graph/badge.svg)](https://codecov.io/gh/vianakaique12/Projeto-SentinelCore-SOAR-Blue-Team-Automation)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+
 Projeto de automação de segurança focado em fluxo SOC real:
 - Enriquecimento de IOC (VirusTotal + AbuseIPDB)
 - Scoring e priorização de risco
@@ -381,16 +386,74 @@ Se o Redis estiver indisponível ao iniciar, o sistema faz fallback automático 
 - Logs estruturados e correlação por `correlation_id`
 - Métricas Prometheus
 
+## Testes e Cobertura
+
+### Rodar testes
+
+```bash
+# Rápido — sem relatório de cobertura
+pytest -q
+
+# Com resumo de cobertura no terminal
+pytest --cov=. --cov-report=term-missing -q
+
+# Gerar relatório HTML navegável
+pytest --cov=. --cov-report=html -q
+# Abrir: htmlcov/index.html
+```
+
+### Relatório HTML local
+
+Após rodar `pytest --cov=. --cov-report=html`, abra o relatório no browser:
+
+```bash
+# Linux / Mac
+open htmlcov/index.html
+
+# Windows
+start htmlcov/index.html
+```
+
+O relatório mostra linha a linha quais trechos estão cobertos (verde) e quais não estão (vermelho).
+
+### Cobertura mínima
+
+O arquivo `.coveragerc` define `fail_under = 60` — o CI falha automaticamente se a cobertura global cair abaixo de 60%.
+Para verificar o threshold localmente:
+
+```bash
+pytest --cov=. --cov-fail-under=60 -q
+```
+
+### O que está excluído da medição
+
+Configurado em `.coveragerc`:
+
+| Padrão excluído | Motivo |
+|---|---|
+| `tests/*` | Arquivos de teste não medem a si mesmos |
+| `if __name__ == "__main__":` | Bloco de entrada CLI, não testável via pytest |
+| `except ImportError / ModuleNotFoundError` | Dependências opcionais (psycopg, rq, jwt) |
+| `if TYPE_CHECKING:` | Imports só para type checkers, nunca executados |
+| `raise NotImplementedError` | Stubs abstratos |
+
+### CI e badge
+
+O pipeline CI (`.github/workflows/ci.yml`) roda em Python 3.11 e 3.12 e:
+1. Instala dependências (`requirements.txt` + `ruff`)
+2. Valida sintaxe com `py_compile` em todos os módulos
+3. Roda `pytest --cov` e verifica o threshold
+4. Faz upload do relatório para [Codecov](https://codecov.io) (apenas Python 3.12)
+
+O badge de cobertura no topo do README é atualizado automaticamente a cada push no master.
+
+---
+
 ## Qualidade de engenharia
 
-- Testes unitários e de API com `pytest`
-- Pipeline CI no GitHub Actions (`py_compile + pytest`)
-
-Rodar testes:
-
-```powershell
-pytest -q
-```
+- Testes unitários e de API com `pytest` + `pytest-cov`
+- Pipeline CI no GitHub Actions (`lint + py_compile + pytest --cov + codecov`)
+- Cobertura mínima de 60% aplicada no CI
 
 ## Variáveis de ambiente
 

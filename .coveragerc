@@ -1,0 +1,43 @@
+[run]
+# Measure all project source files from the root.
+source = .
+omit =
+    # Never measure test files themselves
+    tests/*
+    # Standard non-source artefacts
+    setup.py
+    conftest.py
+    */__pycache__/*
+
+[report]
+# Fail the CI step if overall coverage drops below this threshold.
+fail_under = 60
+
+# Show which lines are NOT covered in the terminal summary.
+show_missing = true
+
+# Lines matching any of these patterns are excluded from measurement.
+exclude_lines =
+    # Standard pragma
+    pragma: no cover
+
+    # Abstract method stubs — not meant to be executed
+    raise NotImplementedError
+    @abstractmethod
+    @abc.abstractmethod
+
+    # if __name__ == "__main__" guards
+    if __name__ == .__main__.:
+
+    # Optional / graceful-degradation import blocks
+    except ImportError
+    except ImportError:
+    except ModuleNotFoundError
+    except ModuleNotFoundError:
+
+    # Type-checking-only imports (never executed at runtime)
+    if TYPE_CHECKING:
+
+[html]
+# Output directory for the HTML coverage report.
+directory = htmlcov
