@@ -226,6 +226,102 @@ Consultar status do job:
 curl http://127.0.0.1:8000/jobs/SEU_JOB_ID
 ```
 
+## Idempotência e Deduplicação
+
+O SentinelCore evita reprocessar o mesmo IOC múltiplas vezes dentro de uma janela temporal configu­rável. Isso reduz chamadas desnecessárias às APIs externas (VirusTotal, AbuseIPDB) e evita *alert storms* em pipelines automatizados.
+
+### Como funciona
+
+```
+IOC recebido
+    │
+    ▼
+hash_ioc(ioc, ioc_type)  →  SHA-256( lower(ioc) + "|" + lower(ioc_type) )
+    │
+    ▼
+ioc_seen table: last_seen >= now - window?
+    │                         │
+   Sim                       Não
+    │                         │
+    ▼                         ▼
+get_cached_finding()     Enriquecimento normal
+    │                    (VirusTotal + AbuseIPDB)
+    ▼                         │
+Retorna finding anterior       ▼
+  {skipped: true,        Salva finding
+   cached: true,         mark_ioc_seen()
+   risk_score: <real>}
+```
+
+1. A cada submissão, a chave de idempotência é **SHA-256(lower(ioc) + "|" + lower(ioc_type))**.
+2. A tabela `ioc_seen` registra `first_seen`, `last_seen` e `seen_count`.
+3. Se o IOC foi processado dentro da janela, o **finding completo** (com score real, MITRE, runbook) é retornado diretamente da tabela `findings` — sem consultar APIs externas.
+4. Fora da janela, o IOC é reprocessado normalmente e o resultado é salvo novamente.
+
+O finding retornado em cache inclui as flags:
+```json
+{ "skipped": true, "cached": true, "risk_score": 55, "priority": "high", ... }
+```
+
+### Configurar a janela temporal
+
+| Variável de ambiente | Padrão | Descrição |
+|---|---|---|
+| `MINI_SOAR_ENABLE_IDEMPOTENCY` | `true` | Liga/desliga a deduplicação |
+| `MINI_SOAR_IDEMPOTENCY_WINDOW_SECONDS` | `3600` | Janela em segundos (1 hora) |
+| `MINI_SOAR_DATABASE_URL` | `sqlite:///mini_soar.db` | Banco onde o histórico é guardado |
+| `MINI_SOAR_PERSIST_FINDINGS` | `true` | Deve estar `true` para cache funcionar |
+
+Exemplos de janela:
+
+```bash
+# 10 minutos
+MINI_SOAR_IDEMPOTENCY_WINDOW_SECONDS=600
+
+# 24 horas
+MINI_SOAR_IDEMPOTENCY_WINDOW_SECONDS=86400
+
+# Desabilitar (sempre reprocessa)
+MINI_SOAR_ENABLE_IDEMPOTENCY=false
+```
+
+### Exemplo: mesmo IOC duas vezes dentro da janela
+
+```powershell
+# 1ª submissão — enriquecimento real
+curl -X POST http://127.0.0.1:8000/analyze `
+  -H "Content-Type: application/json" `
+  -d '{"ioc":"8.8.8.8"}'
+# → {"risk_score": 55, "skipped": false, ...}
+
+# 2ª submissão (dentro de 1 hora) — retorna cache
+curl -X POST http://127.0.0.1:8000/analyze `
+  -H "Content-Type: application/json" `
+  -d '{"ioc":"8.8.8.8"}'
+# → {"risk_score": 55, "skipped": true, "cached": true, ...}
+```
+
+```bash
+# CLI — analisa o mesmo arquivo duas vezes
+python mini_soar.py --input iocs.txt --output report1.json
+python mini_soar.py --input iocs.txt --output report2.json
+# report2.json: todos os IOCs com "skipped": true, "cached": true
+```
+
+### Como desabilitar
+
+```bash
+# Via env var
+export MINI_SOAR_ENABLE_IDEMPOTENCY=false
+
+# CLI — flag direta
+python mini_soar.py --disable-idempotency --input iocs.txt
+```
+
+Quando desabilitado, cada submissão executa o pipeline completo independentemente do histórico.
+
+---
+
 ## Segurança e confiabilidade
 
 - API Key/JWT (configurável por env)

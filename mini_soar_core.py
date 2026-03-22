@@ -285,30 +285,53 @@ def process_ioc(
     generated_at = utc_now_iso()
     errors: list[str] = []
 
-    if config.enable_idempotency and local_store.seen_recent_ioc(ioc, config.idempotency_window_seconds):
-        finding = {
-            "ioc": ioc,
-            "ioc_type": ioc_type,
-            "generated_at": generated_at,
-            "correlation_id": correlation_id,
-            "risk_score": 0,
-            "priority": "low",
-            "reasons": [f"Skipped duplicate IOC in idempotency window ({config.idempotency_window_seconds}s)."],
-            "virustotal": None,
-            "abuseipdb": None,
-            "errors": [],
-            "ticket": None,
-            "integrations": [],
-            "skipped": True,
-            "mitre_attack": map_finding_to_mitre({"ioc_type": ioc_type, "priority": "low"}),
-            "runbook_steps": build_runbook_steps({"ioc": ioc, "ioc_type": ioc_type, "priority": "low"}),
-        }
+    if config.enable_idempotency and local_store.seen_recent_ioc(
+        ioc, config.idempotency_window_seconds, ioc_type
+    ):
+        cached = local_store.get_cached_finding(ioc, ioc_type)
+        if cached is not None:
+            # Return the real enriched result; update request-scoped fields only.
+            finding = dict(cached)
+            finding["skipped"] = True
+            finding["cached"] = True
+            finding["correlation_id"] = correlation_id
+            finding["generated_at"] = generated_at
+        else:
+            # Defensive fallback: IOC was seen but no stored finding available
+            # (e.g. persist_findings was disabled on the first run).
+            finding = {
+                "ioc": ioc,
+                "ioc_type": ioc_type,
+                "generated_at": generated_at,
+                "correlation_id": correlation_id,
+                "risk_score": 0,
+                "priority": "low",
+                "reasons": [
+                    f"Skipped duplicate IOC in idempotency window"
+                    f" ({config.idempotency_window_seconds}s); no cached finding available."
+                ],
+                "virustotal": None,
+                "abuseipdb": None,
+                "errors": [],
+                "ticket": None,
+                "integrations": [],
+                "skipped": True,
+                "cached": False,
+                "mitre_attack": map_finding_to_mitre({"ioc_type": ioc_type, "priority": "low"}),
+                "runbook_steps": build_runbook_steps(
+                    {"ioc": ioc, "ioc_type": ioc_type, "priority": "low"}
+                ),
+            }
         local_store.mark_ioc_seen(ioc, ioc_type)
-        if config.persist_findings:
-            local_store.save_finding(correlation_id or "no-correlation-id", finding)
-        IOCS_PROCESSED_TOTAL.labels(ioc_type=ioc_type, priority="low").inc()
-        log_event(local_logger, logging.INFO, "ioc_skipped_idempotency",
-                  correlation_id=correlation_id, ioc=ioc, ioc_type=ioc_type)
+        # Do not re-persist — the original finding is already in storage.
+        IOCS_PROCESSED_TOTAL.labels(
+            ioc_type=ioc_type, priority=finding.get("priority", "low")
+        ).inc()
+        log_event(
+            local_logger, logging.INFO, "ioc_skipped_idempotency",
+            correlation_id=correlation_id, ioc=ioc, ioc_type=ioc_type,
+            cached=cached is not None,
+        )
         return finding
 
     vt_data: dict[str, Any] | None = None
