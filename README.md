@@ -146,7 +146,8 @@ chmod +x start_stack.sh stop_stack.sh
 ```
 
 Endpoints:
-- Dashboard: `http://127.0.0.1:8000`
+- **Dashboard**: `http://127.0.0.1:8000/dashboard` ← visão geral dos findings, gráficos, filtros e exportação CSV
+- Analyzer:   `http://127.0.0.1:8000`
 - API Docs:  `http://127.0.0.1:8000/docs`
 - Health:    `http://127.0.0.1:8000/health`
 - Metrics:   `http://127.0.0.1:8000/metrics`
