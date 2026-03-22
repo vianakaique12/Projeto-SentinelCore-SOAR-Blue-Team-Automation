@@ -2,34 +2,62 @@ name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
+    branches: [master]
 
 jobs:
   test:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install ruff
 
-      - name: Syntax check
+      - name: Lint (ruff)
         run: |
-          python -m py_compile mini_soar.py mini_soar_core.py mini_soar_api.py mini_soar_queue.py mini_soar_worker.py
+          ruff check . --select E,F,W --ignore E501 --output-format=github
+
+      - name: Syntax check (py_compile)
+        run: |
+          python -m py_compile \
+            mini_soar.py \
+            mini_soar_core.py \
+            mini_soar_api.py \
+            mini_soar_queue.py \
+            mini_soar_worker.py \
+            mini_soar_storage.py \
+            mini_soar_observability.py \
+            mini_soar_mitre.py
 
       - name: Run tests
         run: |
-          pytest -q
+          pytest -q --tb=short
 
+      - name: Validate scripts are executable
+        run: |
+          test -f start_local.sh
+          test -f stop_local.sh
+          test -f start_stack.sh
+          test -f stop_stack.sh
+          bash -n start_local.sh
+          bash -n stop_local.sh
+          bash -n start_stack.sh
+          bash -n stop_stack.sh

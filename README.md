@@ -124,21 +124,27 @@ flowchart TD
 
 Subir stack completa (`API + Redis + Worker`):
 
+| Windows (PowerShell) | Linux / Mac (Bash) |
+|---|---|
+| `.\start_stack.ps1` | `./start_stack.sh` |
+| `.\stop_stack.ps1` | `./stop_stack.sh` |
+
 ```powershell
+# Windows
 .\start_stack.ps1
 ```
 
-Parar stack:
-
-```powershell
-.\stop_stack.ps1
+```bash
+# Linux / Mac
+chmod +x start_stack.sh stop_stack.sh
+./start_stack.sh
 ```
 
 Endpoints:
-- API: `http://127.0.0.1:8000`
-- Docs: `http://127.0.0.1:8000/docs`
-- Health: `http://127.0.0.1:8000/health`
-- Metrics: `http://127.0.0.1:8000/metrics`
+- Dashboard: `http://127.0.0.1:8000`
+- API Docs:  `http://127.0.0.1:8000/docs`
+- Health:    `http://127.0.0.1:8000/health`
+- Metrics:   `http://127.0.0.1:8000/metrics`
 
 ## Modo Demo (sem API keys)
 
@@ -173,15 +179,26 @@ Instalar dependências:
 python -m pip install -r .\requirements.txt
 ```
 
-Executar via CLI:
+Subir localmente (API + Worker automático):
 
-```powershell
-python .\mini_soar.py --input .\iocs.txt --ticket-backend none --output .\report.json
+| Windows (PowerShell) | Linux / Mac (Bash) |
+|---|---|
+| `.\start_local.ps1` | `./start_local.sh` |
+| `.\stop_local.ps1` | `./stop_local.sh` |
+
+```bash
+# Linux / Mac
+chmod +x start_local.sh stop_local.sh
+./start_local.sh
 ```
 
-Executar API:
+Ou manualmente:
 
 ```powershell
+# CLI
+python .\mini_soar.py --input .\iocs.txt --ticket-backend none --output .\report.json
+
+# API
 uvicorn mini_soar_api:app --host 0.0.0.0 --port 8000
 ```
 
