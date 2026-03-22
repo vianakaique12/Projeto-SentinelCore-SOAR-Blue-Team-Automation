@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mini_soar_core import RuntimeConfig, build_config_from_env, read_iocs, run_pipeline
+from mini_soar_feeds import feed_urls_from_env, get_feed_statuses, ingest_feeds
 from mini_soar_health import run_health_checks
 from mini_soar_storage import create_store
 from mini_soar_observability import (
@@ -101,6 +102,29 @@ class FindingsResponse(BaseModel):
     limit: int
     offset: int
     findings: list[dict]
+
+
+class FeedIngestRequest(BaseModel):
+    urls: list[str] = Field(
+        default_factory=list,
+        description="Feed URLs to ingest. If empty, uses MINI_SOAR_FEED_URLS env var.",
+        max_length=50,
+    )
+    format: Literal["csv", "stix", "auto"] = Field(
+        default="auto",
+        description="Feed format: csv | stix | auto (default: auto).",
+    )
+    ioc_column: str = Field(
+        default="ioc",
+        description="CSV column name containing the IOC value (csv format only).",
+        max_length=128,
+    )
+
+    @field_validator("urls")
+    @classmethod
+    def validate_urls(cls, value: list[str]) -> list[str]:
+        cleaned = [u.strip() for u in value if u.strip()]
+        return cleaned
 
 
 def choose(value: object, fallback: object) -> object:
@@ -1160,3 +1184,48 @@ def export_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Feed ingestion ──────────────────────────────────────────────────────────────
+
+@app.post("/feeds/ingest", status_code=200)
+def trigger_feed_ingest(
+    body: FeedIngestRequest | None = None,
+    _: dict[str, Any] = Depends(authorize_request),
+) -> JSONResponse:
+    """Manually trigger IOC feed ingestion.
+
+    If ``body.urls`` is empty the endpoint falls back to ``MINI_SOAR_FEED_URLS``.
+    Returns per-feed stats and pipeline totals.
+    """
+    req = body or FeedIngestRequest()
+    urls = req.urls or feed_urls_from_env()
+    if not urls:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No feed URLs provided. Pass 'urls' in the request body or set MINI_SOAR_FEED_URLS.",
+        )
+
+    env_cfg = build_config_from_env()
+    feed_timeout = int(os.getenv("MINI_SOAR_FEED_TIMEOUT", "30"))
+
+    try:
+        result = ingest_feeds(
+            urls=urls,
+            fmt=req.format,
+            ioc_column=req.ioc_column,
+            config=env_cfg,
+            timeout=feed_timeout,
+        )
+    except Exception as exc:
+        logger.exception("feed_ingest_error")
+        raise HTTPException(status_code=500, detail=f"Feed ingestion failed: {exc}") from exc
+
+    return JSONResponse(result)
+
+
+@app.get("/feeds/status")
+def feed_status(_: dict[str, Any] = Depends(authorize_request)) -> JSONResponse:
+    """Return the status of all previously polled feeds."""
+    statuses = get_feed_statuses()
+    return JSONResponse({"feeds": statuses, "count": len(statuses)})
